@@ -25,6 +25,7 @@
         <module>cloud-files</module>
         <module>cloud-app</module>
     <module>cloud-billing</module>
+        <module>cloud-portal</module>
     </modules>
 
     <properties>

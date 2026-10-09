@@ -1,5 +1,6 @@
 package com.company.cloud.auth.config;
 
+import com.company.cloud.auth.portal.PortalJwtAuthFilter;
 import com.company.cloud.auth.security.JwtAuthFilter;
 import com.company.cloud.auth.security.RolesInterceptor;
 import lombok.RequiredArgsConstructor;
@@ -32,6 +33,7 @@ import java.util.List;
 public class SecurityConfig {
 
     private final JwtAuthFilter jwtAuthFilter;
+    private final PortalJwtAuthFilter portalJwtAuthFilter;
     private final RolesInterceptor rolesInterceptor;
 
     @Bean
@@ -51,6 +53,8 @@ public class SecurityConfig {
                 .requestMatchers("/app/check-update").permitAll()
                 .requestMatchers("/downloads/**").permitAll()
                 .requestMatchers("/swagger-ui/**", "/swagger-ui.html", "/v3/api-docs/**").permitAll()
+                // 门户内网接口：不走 JWT，改由 cloud-portal 的 InternalKeyFilter 校验 X-Internal-Key
+                .requestMatchers("/internal/**").permitAll()
                 .anyRequest().authenticated()
             )
             .exceptionHandling(eh -> eh
@@ -65,7 +69,9 @@ public class SecurityConfig {
                     res.getWriter().write("{\"code\":40301,\"message\":\"没有操作权限\",\"data\":null}");
                 })
             )
-            .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
+            .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
+            // 门户 JWT（RS256）：本系统令牌验签失败时兜底，认证成功注入本地影子用户
+            .addFilterAfter(portalJwtAuthFilter, JwtAuthFilter.class);
         return http.build();
     }
 

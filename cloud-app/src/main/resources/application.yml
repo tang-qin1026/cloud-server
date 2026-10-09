@@ -98,6 +98,38 @@ app:
     rate-limit-per-minute: ${SECURITY_RATE_LIMIT_PER_MINUTE:5}
   role:
     default-quota-bytes: ${DEFAULT_QUOTA_BYTES:21474836480}
+  # ---- 门户接入（《云平台统一门户》产品侧）----
+  # 认证侧：门户 RS256 JWT 验签（cloud-auth · PortalAuthProperties）
+  portal:
+    auth:
+      enabled: ${PORTAL_AUTH_ENABLED:true}
+      jwks-url: ${PORTAL_JWKS_URL:http://localhost:3000/.well-known/jwks.json}
+      issuer: ${PORTAL_ISSUER:cloud-portal}
+      refresh-hours: ${PORTAL_JWKS_REFRESH_HOURS:12}
+      refresh-cron: "${PORTAL_JWKS_REFRESH_CRON:0 0 */12 * * *}"
+      connect-timeout-ms: ${PORTAL_JWKS_CONNECT_TIMEOUT_MS:3000}
+      read-timeout-ms: ${PORTAL_JWKS_READ_TIMEOUT_MS:5000}
+      shadow-username-prefix: ${PORTAL_SHADOW_USERNAME_PREFIX:portal_}
+      shadow-default-quota-bytes: ${PORTAL_SHADOW_DEFAULT_QUOTA_BYTES:21474836480}
+      shadow-password-hash: "${PORTAL_SHADOW_PASSWORD_HASH:!portal-shadow-no-local-login}"
+    # 产品侧：门户内网接口与出账/对账（cloud-portal · PortalProperties）
+    product-code: ${PORTAL_PRODUCT_CODE:storage}
+    base-url: ${PORTAL_BASE_URL:http://localhost:3000}
+    internal-key: ${PORTAL_INTERNAL_KEY:}
+    wallet-deduct-path: ${PORTAL_WALLET_DEDUCT_PATH:/api/internal/wallet/deduct}
+    wallet-refund-path: ${PORTAL_WALLET_REFUND_PATH:/api/internal/wallet/refund}
+    reconciliation-path: ${PORTAL_RECONCILIATION_PATH:/api/internal/reconciliation/report}
+    connect-timeout-ms: ${PORTAL_CONNECT_TIMEOUT_MS:3000}
+    read-timeout-ms: ${PORTAL_READ_TIMEOUT_MS:10000}
+    deduct-retry-delays-ms: ${PORTAL_DEDUCT_RETRY_DELAYS_MS:1000,5000,30000}
+    subscribe-grace-days: ${PORTAL_SUBSCRIBE_GRACE_DAYS:7}
+    expire-cron: "${PORTAL_EXPIRE_CRON:0 0 4 * * *}"
+    reconcile-cron: "${PORTAL_RECONCILE_CRON:0 0 6 * * *}"
+    reconcile-retries: ${PORTAL_RECONCILE_RETRIES:3}
+    postpaid:
+      enabled: ${PORTAL_POSTPAID_ENABLED:false}
+      cron: "${PORTAL_POSTPAID_CRON:0 30 5 * * *}"
+      batch-size: ${PORTAL_POSTPAID_BATCH_SIZE:200}
   update:
     # 拼 apkUrl 的公网入口（含端口），须与 nginx /downloads/ 对外地址一致
     base-url: ${APP_UPDATE_BASE_URL:https://112.4.135.254:19999}

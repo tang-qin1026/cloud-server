@@ -35,6 +35,11 @@
         <artifactId>cloud-billing</artifactId>
         <version>${project.version}</version>
     </dependency>
+    <dependency>
+        <groupId>com.company.cloud</groupId>
+        <artifactId>cloud-portal</artifactId>
+        <version>${project.version}</version>
+    </dependency>
 
         <dependency>
             <groupId>org.springframework.boot</groupId>
