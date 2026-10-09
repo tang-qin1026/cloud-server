@@ -43,6 +43,20 @@ public class PortalProvisionService {
     private static final String STATUS_ACTIVE = "active";
     private static final String STATUS_FAILED = "failed";
 
+    /**
+     * 单笔开通允许的数量上限。
+     *
+     * <p>与计费模块的 gbCount 1~1000 口径保持一致。**必须限界**：契约没有约束 quantity，
+     * 若放任传入 {@code Integer.MAX_VALUE}，{@code quota_gb × quantity × 1024³} 会静默溢出 long。
+     * 实测（2026-10-09）：storage-2t（2048 GiB）× 2147483647 溢出为 {@code -2199023255552}，
+     * 接口仍返回 code=0 + instance_id，而配额护栏（grantedBytes &gt; 0）把授予整个跳过 ——
+     * 结果是「门户已扣费、本侧报告成功、实际什么都没授予」。因此这里在计算前直接拒绝。
+     */
+    private static final int MAX_QUANTITY = 1000;
+
+    /** 单笔开通授予的配额上限（1 PiB）。防止 quota_gb 被误配成巨值时同样溢出。 */
+    private static final long MAX_GRANTED_BYTES = 1L << 50;
+
     private final PortalProvisionMapper provisionMapper;
     private final PortalProductSkuMapper skuMapper;
     private final PortalShadowUserService shadowUserService;
@@ -92,7 +106,7 @@ public class PortalProvisionService {
             // ── 4. 影子用户（门户用户首次到达业务侧时建档）────────────────
             CurrentUser localUser = shadowUserService.resolveForProvision(req.portalUserId());
 
-            long grantedBytes = (long) (sku.getQuotaGb() == null ? 0 : sku.getQuotaGb()) * quantity * GIB;
+            long grantedBytes = computeGrantedBytes(sku, quantity);
             int periodDays = req.periodDays() != null
                     ? req.periodDays()
                     : (sku.getPeriodDays() == null ? 30 : sku.getPeriodDays());
@@ -161,6 +175,39 @@ public class PortalProvisionService {
             // 5001：门户会重试（最多 3 次），用尽后自动退款
             throw PortalApiException.internalError("开通失败：" + e.getMessage());
         }
+    }
+
+    /**
+     * 计算本次开通授予的配额（字节），并做溢出与上限防护。
+     *
+     * <p>用量除法做上限判断（{@code unitBytes > MAX_GRANTED_BYTES / quantity}）而不是
+     * 先乘再比——后者本身就会溢出。quantity ≥ 1 由调用方保证，故除数安全。
+     *
+     * @throws PortalApiException 5001：quantity 越界或总量超上限。
+     *         用 5001 而非 4003/4004，是因为契约里 5001 定义为「内部错误（资源不足等）」，
+     *         门户会重试并在用尽后自动退款；这样能保证**绝不误授予资源**且用户拿到退款。
+     */
+    private long computeGrantedBytes(PortalProductSku sku, int quantity) {
+        if (quantity < 1 || quantity > MAX_QUANTITY) {
+            throw PortalApiException.internalError(
+                    "quantity 超出允许范围 1~" + MAX_QUANTITY + "，实际=" + quantity);
+        }
+        long quotaGb = sku.getQuotaGb() == null ? 0L : sku.getQuotaGb();
+        if (quotaGb < 0) {
+            throw PortalApiException.internalError("SKU 配额配置非法（quota_gb=" + quotaGb + "），sku=" + sku.getSkuId());
+        }
+        long unitBytes = quotaGb * GIB;   // quota_gb 为 int（≤2^31-1），乘 2^30 不会溢出 long
+        if (unitBytes > MAX_GRANTED_BYTES / quantity) {
+            throw PortalApiException.internalError(
+                    "开通总量超出单笔上限 " + MAX_GRANTED_BYTES + " 字节：sku=" + sku.getSkuId()
+                            + " quota_gb=" + quotaGb + " quantity=" + quantity);
+        }
+        long granted = unitBytes * quantity;
+        if (granted < 0) {
+            // 理论不可达（上面已限界），留作最后一道断言，避免无护栏的乘法回归
+            throw PortalApiException.internalError("授予配额计算溢出，已拒绝：sku=" + sku.getSkuId());
+        }
+        return granted;
     }
 
     /** 失败善后：回补库存 + 仅在「本调用方拥有 granting」时把记录置 failed。 */

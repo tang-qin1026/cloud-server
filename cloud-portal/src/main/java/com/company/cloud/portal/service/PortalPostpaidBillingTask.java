@@ -56,7 +56,11 @@ public class PortalPostpaidBillingTask {
                 skipped++;
                 continue;   // 非按量 / 已下架：不出账
             }
-            long amount = sku.getPriceCents() * Math.max(1, p.getQuantity());
+            long amount = safeAmountCents(sku, p);
+            if (amount < 0) {
+                skipped++;
+                continue;
+            }
             PortalBillService.ChargeResult result = billService.charge(
                     p.getPortalUserId(), p.getLocalUserId(), amount,
                     PortalBillService.TYPE_POSTPAID, null);
@@ -70,5 +74,29 @@ public class PortalPostpaidBillingTask {
         }
         log.info("[portal] 按量后付出账完成：成功 {} 条，跳过（非按量/下架）{} 条，候选 {} 条",
                 billed, skipped, candidates.size());
+    }
+
+    /**
+     * 安全计算单笔出账金额（分）＝ 单价 × 数量。
+     *
+     * <p>用 {@link Math#multiplyExact(long, long)} 而不是裸乘法：裸乘法溢出会静默变成负数，
+     * 而负金额传给 {@code /wallet/deduct} 语义完全错误（可能被当成退款）。
+     *
+     * @return 金额；溢出或单价非法时返回 -1，调用方跳过该条并计数
+     */
+    private long safeAmountCents(PortalProductSku sku, PortalProvision p) {
+        long price = sku.getPriceCents() == null ? 0L : sku.getPriceCents();
+        long qty = Math.max(1, p.getQuantity() == null ? 1 : p.getQuantity());
+        if (price < 0) {
+            log.warn("[portal] SKU 单价为负，跳过出账 sku={} priceCents={}", sku.getSkuId(), price);
+            return -1L;
+        }
+        try {
+            return Math.multiplyExact(price, qty);
+        } catch (ArithmeticException e) {
+            log.warn("[portal] 出账金额溢出，跳过 orderItemId={} sku={} priceCents={} quantity={}",
+                    p.getOrderItemId(), sku.getSkuId(), price, qty);
+            return -1L;
+        }
     }
 }
