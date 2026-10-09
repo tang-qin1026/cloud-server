@@ -27,10 +27,15 @@
 
 ### 1. `internalKey` —— 给 `/api/internal/**` 用
 
-| 填什么 | 平台侧下发的内部密钥（后端配置项 `app.portal.internal-key`） |
+| 项 | 说明 |
 |---|---|
-| 本地开发示例 | `verify-key-123`（启动时 `PORTAL_INTERNAL_KEY` 环境变量的值） |
+| 填什么 | **平台侧下发的内部密钥**，即启动时注入的 `PORTAL_INTERNAL_KEY` 环境变量值 |
+| 配置项 | `app.portal.internal-key`（`application.yml` 里的默认值是**空**） |
+| 怎么拿 | 找平台侧（门户负责人）索取；**同一环境用同一个值** |
 
+> 🔒 **密钥绝不写进代码或仓库**。`application.yml` 里只保留空默认值 `${PORTAL_INTERNAL_KEY:}`，
+> 真实值通过环境变量（或你们的密钥管理/容器 Secret）注入。本文档也刻意不写具体值——需要时向平台侧索取。
+>
 > **未配置密钥时后端 fail-closed**：任何 `/internal/**` 调用都返回 `HTTP 401 {"code":40001}`。
 > 也就是说，本地起服务如果忘了设 `PORTAL_INTERNAL_KEY`，这个接口一定调不通，这是**预期行为**。
 
