@@ -1,0 +1,2753 @@
+openapi: 3.0.1
+info:
+  title: cloud-server · 云存储平台 API
+  description: |
+    ## 统一门户接入（云存储侧）
+
+    本产品接入《云平台统一门户》所需的接口，分为两组：
+
+    | 分组 | 路径 | 鉴权 | 调用方 |
+    |---|---|---|---|
+    | 门户内网接口 | `/api/internal/**` | 请求头 `X-Internal-Key` | 门户主动调用 |
+    | 门户运维接口 | `/api/admin/portal/**` | Bearer JWT + admin 角色 | 运维/联调手工触发 |
+
+    ### 测试前必做：点右上角 Authorize
+    1. **internalKey**：填平台侧下发的密钥（对应 `app.portal.internal-key`）。
+       未配置时后端会 fail-closed，一律返回 `HTTP 401 {"code":40001}`。
+    2. **bearerAuth**：填 `admin / Admin@123` 调 `/api/auth/login` 拿到的 `accessToken`
+       （**只填 token 本身，不要带 "Bearer " 前缀**；注意 accessToken 在响应 `data.accessToken`，不是 `data.token`）。
+
+    ### 两个必须知道的约定
+    - **`price_cents` / `amount_cents` 单位一律是「分」**，不是元。
+    - **`/internal/provision` 的 HTTP 状态码恒为 200**，成败看 body 里的 `code`
+      （`0` 成功 / `4003` sku 不存在 / `4004` 库存不足 / `5001` 内部错误）。POST 默认的 201 会让门户判错。
+  version: v1
+servers:
+- url: http://127.0.0.1:3001/api
+  description: Generated server url
+tags:
+- name: 文件管理
+  description: 目录树、重命名/移动、回收站入口（C 组）
+- name: 统计大盘
+  description: 个人存储统计概览（C 组）
+- name: 回收站
+  description: 回收站列表、还原、彻底删除（C 组）
+- name: 门户内网接口
+  description: 供门户调用的内网接口（鉴权：请求头 X-Internal-Key）。门户每 10 分钟拉取商品目录；用户支付后调用开通。测试前请点右上角
+    Authorize 填入内部密钥。
+- name: 审计日志
+  description: 审计日志查询（C 组）
+- name: 门户运维接口
+  description: 管理端手工触发（鉴权：Bearer JWT + admin 角色）：出账扣费、退款、补报对账。用于验证「先落库再扣费」等机制，无需等定时任务。先调
+    /api/auth/login 拿 accessToken 再点 Authorize。
+paths:
+  /uploads/{id}/parts/{no}:
+    put:
+      tags:
+      - upload-controller
+      operationId: part
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: "no"
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int32
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultVoid"
+  /uploads/{id}/complete:
+    post:
+      tags:
+      - upload-controller
+      operationId: complete
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultCompleteResult"
+  /uploads/{id}/abort:
+    post:
+      tags:
+      - upload-controller
+      operationId: abort
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultVoid"
+  /uploads/init:
+    post:
+      tags:
+      - upload-controller
+      operationId: init
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InitRequest"
+        required: true
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultMapStringObject"
+  /uploads/clear-completed:
+    post:
+      tags:
+      - upload-controller
+      operationId: clearCompleted
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultInteger"
+  /internal/provision:
+    post:
+      tags:
+      - 门户内网接口
+      summary: ② 开通（幂等，order_item_id 为幂等键）
+      description: |
+        门户在用户支付成功后调用，为本产品开通实例（云存储＝给该用户增加存储配额）。
+
+        ### 两条铁律（后端已实现，联调时请据此验证）
+        1. **`order_item_id` 是幂等键**：有持久化唯一索引，
+           同一个 `order_item_id` **只会开通一次**，重复调用直接返回首次结果（含相同 `instance_id`）。
+        2. **先落库再建实例**：服务端先写 provision 记录再授予配额，
+           否则门户超时重试会开出两个实例。
+
+        ### HTTP 状态码恒为 200，成败看 body 的 `code`
+        | code | 场景 | 门户行为 |
+        |---|---|---|
+        | `0` | 成功（或幂等命中首次结果） | 正常 |
+        | `4003` | sku 不存在/已下架 | **不重试**，立即退款 |
+        | `4004` | 库存不足 | **不重试**，立即退款 |
+        | `5001` | 内部错误（含 `quantity` 越界、开通进行中） | **会重试**（最多 3 次），用尽后自动退款 |
+
+        ### 入参约束
+        - `quantity`：**1~1000**（缺省 1）。越界返回 `5001`，不会误授予资源。
+        - 单笔授予总量上限 1 PiB。
+        - `period_days`：不传则用 SKU 自身的 `period_days`。
+      operationId: provision
+      requestBody:
+        description: 开通请求（字段名 snake_case）
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProvisionRequest"
+            examples:
+              最小请求:
+                description: 最小请求
+                value:
+                  order_item_id: 50001
+                  portal_user_id: 018f3a2b-7c1d-7000-9e21-3f9a2b8c1d00
+                  sku_id: storage-500g
+                  quantity: 1
+                  period_days: 30
+              带 extra（原样落库）:
+                description: 带 extra（原样落库）
+                value:
+                  order_item_id: 50002
+                  portal_user_id: 018f3a2b-7c1d-7000-9e21-3f9a2b8c1d00
+                  sku_id: storage-100g
+                  quantity: 2
+                  period_days: 90
+                  extra:
+                    渠道: 小程序
+                    orderNo: A-1
+        required: true
+      responses:
+        "200":
+          description: HTTP 200 恒定；成功时 body.code=0
+          content:
+            application/json:
+              examples:
+                成功:
+                  description: 成功
+                  value:
+                    code: 0
+                    message: ok
+                    data:
+                      instance_id: st-000001
+                      expire_at: 2026-11-08T02:42:19Z
+                      quantity: 1
+        "401":
+          description: 内部密钥缺失或错误
+          content:
+            application/json:
+              example:
+                code: 40001
+                message: 无效的内部调用凭证
+                data: null
+      security:
+      - internalKey: []
+  /files/{id}/restore:
+    post:
+      tags:
+      - 回收站
+      summary: 还原（R-C06）：未指定 targetParentId 回原位，指定则恢复到目标目录；重名自动改名
+      operationId: restore
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RestoreRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultFileNodeVO"
+  /files/mkdir:
+    post:
+      tags:
+      - 文件管理
+      summary: 新建文件夹（R-C02）：同级重名自动改名
+      operationId: mkdir
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MkdirRequest"
+        required: true
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultFileNodeVO"
+  /billing/increase-requests:
+    get:
+      tags:
+      - billing-controller
+      operationId: myRequests
+      parameters:
+      - name: page
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+          default: 1
+      - name: size
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+          default: 20
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultPageRequestView"
+    post:
+      tags:
+      - billing-controller
+      operationId: createRequest
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateIncreaseRequest"
+        required: true
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultCreateResult"
+  /auth/refresh:
+    post:
+      tags:
+      - auth-controller
+      operationId: refresh
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RefreshRequest"
+        required: true
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultLoginResponse"
+  /auth/logout:
+    post:
+      tags:
+      - auth-controller
+      operationId: logout
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultVoid"
+  /auth/login:
+    post:
+      tags:
+      - auth-controller
+      operationId: login
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+        required: true
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultLoginResponse"
+  /auth/change-password:
+    post:
+      tags:
+      - auth-controller
+      operationId: changePassword
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangePasswordRequest"
+        required: true
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultVoid"
+  /admin/users:
+    get:
+      tags:
+      - admin-user-controller
+      operationId: list_3
+      parameters:
+      - name: keyword
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: status
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: page
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+          default: 1
+      - name: size
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+          default: 20
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultPageUser"
+    post:
+      tags:
+      - admin-user-controller
+      operationId: create
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateUserRequest"
+        required: true
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultMapStringObject"
+  /admin/users/{id}/reset-password:
+    post:
+      tags:
+      - admin-user-controller
+      operationId: resetPassword
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultMapStringString"
+  /admin/users/{id}/demote:
+    post:
+      tags:
+      - admin-user-controller
+      operationId: demote
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultVoid"
+  /admin/portal/reconciliation/report:
+    post:
+      tags:
+      - 门户运维接口
+      summary: 手工补报当日账单到门户（对账用）
+      description: |
+        门户的日对账是「你的账单 vs 门户流水」逐笔比对，但门户**不直连你的库**，
+        因此需要把账单推给门户 `POST /api/internal/reconciliation/report`。
+
+        - **幂等**：门户按 `(biz_date, product_code, bill_no)` 唯一，重复上报覆盖金额，可安全重放。
+        - **上报范围**：只上报发生过真实资金流水的账单（`status=1` 已入账 / `status=2` 已退款）。
+          `status=0` 的待扣账单门户侧没有流水，上报只会制造噪声差异；
+          其数量通过返回的 `pendingCount` 告知（可用于发现长期卡住未扣的账单）。
+        - 定时任务默认每日 06:00 自动上报前一日，本接口用于**手工补报/测试**。
+      operationId: report
+      parameters:
+      - name: date
+        in: query
+        description: 账期（ISO 日期，如 2026-10-09）；缺省为昨天
+        required: false
+        schema:
+          type: string
+          format: date
+        example: 2026-10-09
+      responses:
+        "200":
+          description: 上报结果（accepted 表示门户已接收）
+          content:
+            application/json:
+              example:
+                code: 0
+                message: ok
+                data:
+                  bizDate: 2026-10-09
+                  billCount: 3
+                  pendingCount: 2
+                  accepted: true
+                  message: ok
+      security:
+      - bearerAuth: []
+  /admin/portal/bills/refund:
+    post:
+      tags:
+      - 门户运维接口
+      summary: 退款（幂等，累计不得超原单金额）
+      description: |
+        1. 以 `type=3`（退款）、`status=0` **先落库**一张退款单（`refund_bill_no` 是退款幂等键）；
+        2. 调门户 `POST /wallet/refund`；
+        3. 成功后退款单置 `status=1`；**累计退清**时把原单置为 `status=2`（已退款），
+           部分退款则原单保持 `status=1`。
+
+        本侧会先做「累计退款不得超过原单金额」的前置校验（门户侧也会拦，返回 `3004`）。
+
+        返回的 `portalCode`：`0` 成功 / `3004` 超退（message 里给出**还能退多少分**）/ `3005` 原单不存在。
+      operationId: refund
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminRefundRequest"
+        required: true
+      responses:
+        "200":
+          description: HTTP 200 恒定，结果看 data.settled / data.portalCode
+          content:
+            application/json:
+              examples:
+                退款成功:
+                  description: 退款成功
+                  value:
+                    code: 0
+                    message: ok
+                    data:
+                      refundBillNo: storage-20261009-000005
+                      settled: true
+                      portalCode: 0
+                      message: ok
+                累计超退被拦:
+                  description: 累计超退被拦
+                  value:
+                    code: 0
+                    message: ok
+                    data:
+                      refundBillNo: null
+                      settled: false
+                      portalCode: 3004
+                      message: 累计退款超过原单金额，最多还能退 600 分
+      security:
+      - bearerAuth: []
+  /admin/portal/bills/charge:
+    post:
+      tags:
+      - 门户运维接口
+      summary: 手工出账并扣费（验证「先落库再扣费」）
+      description: |
+        完整走一遍 `b_bill` 的扣费流程，用于在**不需要真实按量出账**的情况下验证机制：
+
+        1. 生成账单号（`{product_code}-{yyyyMMdd}-{6位序列}`）并以 `status=0`（待扣）**先落库**；
+        2. 调门户 `POST /wallet/deduct`（带 `X-Internal-Key`）；
+        3. 按响应码收敛状态：
+
+        | 门户 code | 本侧处理 | 账单状态 |
+        |---|---|---|
+        | `0` | 成功 | `1` 已入账 |
+        | `3003` | **当成功处理**（幂等重复，取首次结果） | `1` 已入账 |
+        | `3001` 余额不足 / `3002` 钱包冻结 | **不重试** | 保持 `0` 待扣，记 `fail_code` |
+        | 网络超时 / 5xx | **用同一个 bill_no 退避重试**（默认 1s/5s/30s） | 用尽后保持 `0`，`fail_code=5001` |
+
+        ### 怎么验证「先落库再扣费」
+        把门户地址指向一个不可达端口，然后调本接口：
+        **响应是失败，但 `b_bill` 里一定有一条 `status=0` 的记录**（钱没扣成，账记得住，可对账可补扣）。
+
+        ⚠️ 门户持续系统失败时本接口最坏约 36 秒才返回（退避重试所致）。
+        可用环境变量 `PORTAL_DEDUCT_RETRY_DELAYS_MS` 缩短，如 `100,100,100`。
+      operationId: charge
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminChargeRequest"
+        required: true
+      responses:
+        "200":
+          description: HTTP 200 恒定，结果看 data.settled / data.portalCode
+          content:
+            application/json:
+              examples:
+                扣费成功:
+                  description: 扣费成功
+                  value:
+                    code: 0
+                    message: ok
+                    data:
+                      billNo: storage-20261009-000002
+                      settled: true
+                      portalCode: 0
+                      message: ok
+                      retryCount: 0
+                余额不足（不重试）:
+                  description: 余额不足（不重试）
+                  value:
+                    code: 0
+                    message: ok
+                    data:
+                      billNo: storage-20261009-000004
+                      settled: false
+                      portalCode: 3001
+                      message: 余额不足
+                      retryCount: 0
+                门户不可达（已重试3次，账单仍落库）:
+                  description: 门户不可达（已重试3次，账单仍落库）
+                  value:
+                    code: 0
+                    message: ok
+                    data:
+                      billNo: storage-20261009-000001
+                      settled: false
+                      portalCode: 5001
+                      message: 扣费系统失败，已重试 3 次：...
+                      retryCount: 3
+      security:
+      - bearerAuth: []
+  /admin/billing/increase-requests/{id}/reject:
+    post:
+      tags:
+      - admin-billing-controller
+      operationId: reject
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultVoid"
+  /admin/billing/increase-requests/{id}/approve:
+    post:
+      tags:
+      - admin-billing-controller
+      operationId: approve
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultApproveResult"
+  /admin/app/releases:
+    get:
+      tags:
+      - admin-app-release-controller
+      operationId: list_4
+      parameters:
+      - name: platform
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: status
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: page
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+          default: 1
+      - name: size
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+          default: 20
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultPageAppRelease"
+    post:
+      tags:
+      - admin-app-release-controller
+      operationId: create_1
+      parameters:
+      - name: platform
+        in: query
+        required: false
+        schema:
+          type: string
+          default: android
+      - name: versionName
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: updateNotes
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: forceUpdate
+        in: query
+        required: false
+        schema:
+          type: boolean
+      - name: rolloutPercent
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+      - name: publishNow
+        in: query
+        required: false
+        schema:
+          type: boolean
+      - name: versionCode
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              required:
+              - file
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultAppRelease"
+  /admin/app/releases/{id}/publish:
+    post:
+      tags:
+      - admin-app-release-controller
+      operationId: publish
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultAppRelease"
+  /admin/app/releases/{id}/disable:
+    post:
+      tags:
+      - admin-app-release-controller
+      operationId: disable
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultAppRelease"
+  /files/{id}:
+    delete:
+      tags:
+      - 文件管理
+      summary: 删除（R-C04/R-C06）：默认入回收站；?force=1 彻底删除（级联物理删+释放配额）
+      operationId: delete
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: force
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+          default: 0
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultVoid"
+    patch:
+      tags:
+      - 文件管理
+      summary: 重命名 / 移动（R-C03）：禁止移入自身子目录
+      operationId: update
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateNodeRequest"
+        required: true
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultFileNodeVO"
+  /files/batch-move:
+    patch:
+      tags:
+      - 文件管理
+      summary: 批量移动：多选文件/目录一次移入同一目标目录，任一失败整体回滚
+      operationId: batchMove
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BatchMoveRequest"
+        required: true
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultListFileNodeVO"
+  /admin/users/{id}:
+    patch:
+      tags:
+      - admin-user-controller
+      operationId: update_1
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateUserRequest"
+        required: true
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultVoid"
+  /admin/billing/config:
+    get:
+      tags:
+      - admin-billing-controller
+      operationId: config_1
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultConfigView"
+    patch:
+      tags:
+      - admin-billing-controller
+      operationId: updateConfig
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateConfigRequest"
+        required: true
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultConfigView"
+  /admin/app/releases/{id}:
+    delete:
+      tags:
+      - admin-app-release-controller
+      operationId: delete_1
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultVoid"
+    patch:
+      tags:
+      - admin-app-release-controller
+      operationId: patch
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchReleaseRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultAppRelease"
+  /user/me:
+    get:
+      tags:
+      - user-controller
+      operationId: me
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultPageObject"
+  /uploads:
+    get:
+      tags:
+      - upload-controller
+      operationId: list
+      parameters:
+      - name: status
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: page
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+          default: 0
+      - name: size
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+          default: 10
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultUploadTaskPage"
+  /uploads/{id}:
+    get:
+      tags:
+      - upload-controller
+      operationId: status
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultSessionStatus"
+    delete:
+      tags:
+      - upload-controller
+      operationId: deleteTask
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultVoid"
+  /stats/overview:
+    get:
+      tags:
+      - 统计大盘
+      summary: 存储概览（R-C10）：文件/目录/字节/今日新增/回收站/类型分布
+      operationId: overview
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultStatsOverview"
+  /internal/products:
+    get:
+      tags:
+      - 门户内网接口
+      summary: ① 商品目录（门户每 10 分钟拉取）
+      description: |
+        返回本产品**全部在售** SKU，门户据此全量 upsert 到它自己的 `p_product` 缓存表。
+
+        - **无分页**：一次全量返回，门户超时 10 秒，故本接口不做重计算。
+        - **`price_cents` 单位是分**（不是元）。
+        - 不再上报的 sku 会被门户置 `is_active=0` 软下架，因此 **`sku_id` 必须稳定**：
+          改 sku_id 等于下架旧的、上架新的。
+        - `spec` 结构完全由本产品自定，门户原样展示（门户不理解你的字段）。
+        - `stock` 为 `null` 表示不限库存（云存储即如此），前端显示「现货」。
+      operationId: products
+      responses:
+        "200":
+          description: 成功（注意：业务失败也返回 HTTP 200，靠 body.code 区分）
+          content:
+            application/json:
+              examples:
+                "4 个种子 SKU":
+                  description: 4 个种子 SKU
+                  value:
+                    code: 0
+                    message: ok
+                    data:
+                      products:
+                      - sku_id: storage-100g
+                        name: 云存储·100G
+                        spec:
+                          quota_gb: 100
+                          transfer: unlimited
+                          period: 30天
+                        price_cents: 10000
+                        billing_mode: 1
+                        period_days: 30
+                        stock: null
+                      - sku_id: storage-500g
+                        name: 云存储·500G
+                        spec:
+                          quota_gb: 500
+                          transfer: unlimited
+                          period: 30天
+                        price_cents: 50000
+                        billing_mode: 1
+                        period_days: 30
+                        stock: null
+        "401":
+          description: 内部密钥缺失或错误（未配置 app.portal.internal-key 时同样拒绝）
+          content:
+            application/json:
+              example:
+                code: 40001
+                message: 无效的内部调用凭证
+                data: null
+      security:
+      - internalKey: []
+  /files:
+    get:
+      tags:
+      - 文件管理
+      summary: 列目录（R-C01）：分页 + 排序 + 面包屑；keyword 非空时全局搜索
+      operationId: list_1
+      parameters:
+      - name: parent
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int64
+          default: 0
+      - name: page
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+          default: 1
+      - name: size
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+          default: 20
+      - name: sort
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: keyword
+        in: query
+        required: false
+        schema:
+          type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultDirListResponse"
+  /files/{id}/download:
+    get:
+      tags:
+      - upload-controller
+      operationId: download
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: inline
+        in: query
+        required: false
+        schema:
+          type: boolean
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultMapStringString"
+  /files/tree:
+    get:
+      tags:
+      - 文件管理
+      summary: 目录树：一次性返回当前用户全部目录（扁平 id+parentId 列表，前端自行建树）
+      operationId: tree
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultListFileNodeVO"
+  /files/trash:
+    get:
+      tags:
+      - 回收站
+      summary: 回收站列表（R-C05）：parent 空/0 返回顶层，parent>0 返回子项；按删除时间倒序；含 deletedAt/expireAt
+      operationId: list_2
+      parameters:
+      - name: page
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+          default: 1
+      - name: size
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+          default: 20
+      - name: parent
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int64
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultPageResultRecycleItemVO"
+  /billing/quota:
+    get:
+      tags:
+      - billing-controller
+      operationId: quota
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultQuotaView"
+  /billing/config:
+    get:
+      tags:
+      - billing-controller
+      operationId: config
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultConfigView"
+  /auth/profile:
+    get:
+      tags:
+      - auth-controller
+      operationId: profile
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultMapStringObject"
+  /audit-logs:
+    get:
+      tags:
+      - 审计日志
+      summary: 分页查询审计日志（R-C09）：admin 全查，普通用户仅本人
+      operationId: query
+      parameters:
+      - name: userId
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int64
+      - name: action
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: start
+        in: query
+        required: false
+        schema:
+          type: string
+          format: date-time
+      - name: end
+        in: query
+        required: false
+        schema:
+          type: string
+          format: date-time
+      - name: page
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+          default: 1
+      - name: size
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+          default: 20
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultPageResultAuditLogVO"
+  /app/check-update:
+    get:
+      tags:
+      - app-check-controller
+      operationId: check
+      parameters:
+      - name: platform
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: versionCode
+        in: query
+        required: true
+        schema:
+          type: integer
+          format: int32
+      - name: userId
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int64
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultAppUpdateVO"
+  /admin/stats/traffic:
+    get:
+      tags:
+      - admin-stats-controller
+      operationId: traffic
+      parameters:
+      - name: days
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+          default: 7
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultListTrafficPoint"
+  /admin/stats/top-users:
+    get:
+      tags:
+      - admin-stats-controller
+      operationId: topUsers
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultListTopUser"
+  /admin/stats/overview:
+    get:
+      tags:
+      - admin-stats-controller
+      operationId: overview_1
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultAdminStatsOverview"
+  /admin/portal/status:
+    get:
+      tags:
+      - 门户运维接口
+      summary: 门户接入状态速览（排障）
+      description: |
+        仅返回一个提示串，**不返回任何密钥明文**。真正的连通性请用：
+        - `GET /api/internal/products`（验证 `X-Internal-Key` 与门户拉取链路）
+        - `POST /api/admin/portal/reconciliation/report`（验证本侧 → 门户的出站链路）
+      operationId: status_1
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultMapStringObject"
+      security:
+      - bearerAuth: []
+  /admin/billing/records:
+    get:
+      tags:
+      - admin-billing-controller
+      operationId: records
+      parameters:
+      - name: userId
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int64
+      - name: status
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: page
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+          default: 1
+      - name: size
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+          default: 20
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultPageRecordView"
+  /admin/billing/increase-requests:
+    get:
+      tags:
+      - admin-billing-controller
+      operationId: listRequests
+      parameters:
+      - name: status
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: page
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+          default: 1
+      - name: size
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+          default: 20
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ResultPageRequestView"
+components:
+  schemas:
+    ResultVoid:
+      type: object
+      properties:
+        code:
+          type: integer
+          format: int32
+        message:
+          type: string
+        data:
+          type: object
+    CompleteResult:
+      type: object
+      properties:
+        fileId:
+          type: integer
+          format: int64
+        alreadyDone:
+          type: boolean
+    ResultCompleteResult:
+      type: object
+      properties:
+        code:
+          type: integer
+          format: int32
+        message:
+          type: string
+        data:
+          $ref: "#/components/schemas/CompleteResult"
+    InitRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        size:
+          type: integer
+          format: int64
+        parentId:
+          type: integer
+          format: int64
+        sha256:
+          type: string
+    ResultMapStringObject:
+      type: object
+      properties:
+        code:
+          type: integer
+          format: int32
+        message:
+          type: string
+        data:
+          type: object
+          additionalProperties:
+            type: object
+    ResultInteger:
+      type: object
+      properties:
+        code:
+          type: integer
+          format: int32
+        message:
+          type: string
+        data:
+          type: integer
+          format: int32
+    JsonNode:
+      type: object
+      description: 门户透传的附加信息，**任意结构**，本侧原样落库到 `portal_provision.extra`
+      nullable: true
+      example:
+        渠道: 小程序
+        orderNo: A-1
+    ProvisionRequest:
+      required:
+      - order_item_id
+      - portal_user_id
+      - sku_id
+      type: object
+      properties:
+        order_item_id:
+          type: integer
+          description: 门户订单项 id。**幂等键**：同一个值重复调用只会开通一次，直接返回首次结果
+          format: int64
+          example: 50001
+        portal_user_id:
+          maxLength: 36
+          type: string
+          description: 门户用户 UUID（门户 JWT 的 sub）。本产品会据此建立/复用影子本地用户
+          example: 018f3a2b-7c1d-7000-9e21-3f9a2b8c1d00
+        sku_id:
+          maxLength: 64
+          type: string
+          description: 要开通的 SKU 标识（需存在于商品目录且在售）
+          example: storage-500g
+        quantity:
+          maximum: 1000
+          minimum: 1
+          type: integer
+          description: 数量，**允许范围 1~1000**（缺省 1）。越界返回 `code=5001`，不会误授予资源
+          format: int32
+          example: 1
+          default: 1
+        period_days:
+          type: integer
+          description: 周期天数。不传则用该 SKU 自身的 `period_days`
+          format: int32
+          example: 30
+        extra:
+          $ref: "#/components/schemas/JsonNode"
+      description: 开通请求（字段名 snake_case，与门户契约 §3.2 逐字对齐）
+    RestoreRequest:
+      type: object
+      properties:
+        targetParentId:
+          type: integer
+          format: int64
+    FileNodeVO:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        parentId:
+          type: integer
+          format: int64
+        name:
+          type: string
+        isDir:
+          type: boolean
+        size:
+          type: integer
+          format: int64
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    ResultFileNodeVO:
+      type: object
+      properties:
+        code:
+          type: integer
+          format: int32
+        message:
+          type: string
+        data:
+          $ref: "#/components/schemas/FileNodeVO"
+    MkdirRequest:
+      required:
+      - name
+      type: object
+      properties:
+        parentId:
+          type: integer
+          format: int64
+        name:
+          maxLength: 255
+          minLength: 0
+          type: string
+    CreateIncreaseRequest:
+      required:
+      - gbCount
+      type: object
+      properties:
+        gbCount:
+          maximum: 1000
+          minimum: 1
+          type: integer
+          format: int32
+        remark:
+          maxLength: 500
+          minLength: 0
+          type: string
+    CreateResult:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        amountCents:
+          type: integer
+          format: int64
+        status:
+          type: string
+    ResultCreateResult:
+      type: object
+      properties:
+        code:
+          type: integer
+          format: int32
+        message:
+          type: string
+        data:
+          $ref: "#/components/schemas/CreateResult"
+    RefreshRequest:
+      required:
+      - refreshToken
+      type: object
+      properties:
+        refreshToken:
+          type: string
+    LoginResponse:
+      type: object
+      properties:
+        accessToken:
+          type: string
+        refreshToken:
+          type: string
+        user:
+          type: object
+          additionalProperties:
+            type: object
+    ResultLoginResponse:
+      type: object
+      properties:
+        code:
+          type: integer
+          format: int32
+        message:
+          type: string
+        data:
+          $ref: "#/components/schemas/LoginResponse"
+    LoginRequest:
+      required:
+      - password
+      - username
+      type: object
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+    ChangePasswordRequest:
+      required:
+      - newPassword
+      - oldPassword
+      type: object
+      properties:
+        oldPassword:
+          type: string
+        newPassword:
+          type: string
+    CreateUserRequest:
+      required:
+      - username
+      type: object
+      properties:
+        username:
+          type: string
+        initialPassword:
+          type: string
+        quotaBytes:
+          type: integer
+          format: int64
+        role:
+          type: string
+        nickname:
+          type: string
+        email:
+          type: string
+    ResultMapStringString:
+      type: object
+      properties:
+        code:
+          type: integer
+          format: int32
+        message:
+          type: string
+        data:
+          type: object
+          additionalProperties:
+            type: string
+    AdminRefundRequest:
+      required:
+      - amountCents
+      - billNo
+      type: object
+      properties:
+        billNo:
+          type: string
+          description: 原扣费账单号（`b_bill.bill_no`，形态 `storage-20261009-000002`）
+          example: storage-20261009-000002
+        amountCents:
+          minimum: 1
+          type: integer
+          description: 本次退款金额，单位**分**（必须 > 0，且累计退款不得超过原单金额）
+          format: int64
+          example: 1000
+        reason:
+          type: string
+          description: 退款原因（可空，缺省为「管理端发起退款」）
+          example: 开通失败
+      description: 退款请求（注意：本请求体字段是 camelCase）
+    AdminChargeRequest:
+      required:
+      - amountCents
+      - portalUserId
+      - type
+      type: object
+      properties:
+        portalUserId:
+          type: string
+          description: 门户用户 UUID（门户 JWT 的 sub）；本侧据此解析/建立影子本地用户
+          example: 018f3a2b-7c1d-7000-9e21-3f9a2b8c1d00
+        amountCents:
+          minimum: 1
+          type: integer
+          description: 出账金额，单位**分**（必须 > 0）
+          format: int64
+          example: 3000
+        type:
+          type: integer
+          description: 账单类型：`1` 续费 / `2` 按量（`3` 退款由退款接口生成，此处不可传）
+          format: int32
+          example: 2
+          enum:
+          - 1
+          - 2
+        relatedBillNo:
+          type: string
+          description: 关联业务单号（可空），仅用于溯源
+          example: verify-001
+      description: 手工出账请求（注意：本请求体字段是 camelCase）
+    ApproveResult:
+      type: object
+      properties:
+        recordId:
+          type: integer
+          format: int64
+        expireAt:
+          type: string
+          format: date-time
+    ResultApproveResult:
+      type: object
+      properties:
+        code:
+          type: integer
+          format: int32
+        message:
+          type: string
+        data:
+          $ref: "#/components/schemas/ApproveResult"
+    AppRelease:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        platform:
+          type: string
+        versionCode:
+          type: integer
+          format: int32
+        versionName:
+          type: string
+        apkUrl:
+          type: string
+        fileSize:
+          type: integer
+          format: int64
+        fileHash:
+          type: string
+        updateNotes:
+          type: string
+        forceUpdate:
+          type: boolean
+        minForceCode:
+          type: integer
+          format: int32
+        rolloutPercent:
+          type: integer
+          format: int32
+        status:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        publishedAt:
+          type: string
+          format: date-time
+    ResultAppRelease:
+      type: object
+      properties:
+        code:
+          type: integer
+          format: int32
+        message:
+          type: string
+        data:
+          $ref: "#/components/schemas/AppRelease"
+    UpdateNodeRequest:
+      type: object
+      properties:
+        name:
+          maxLength: 255
+          minLength: 0
+          type: string
+        parentId:
+          type: integer
+          format: int64
+        empty:
+          type: boolean
+    BatchMoveRequest:
+      required:
+      - ids
+      - targetParentId
+      type: object
+      properties:
+        ids:
+          type: array
+          items:
+            type: integer
+            format: int64
+        targetParentId:
+          type: integer
+          format: int64
+    ResultListFileNodeVO:
+      type: object
+      properties:
+        code:
+          type: integer
+          format: int32
+        message:
+          type: string
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/FileNodeVO"
+    UpdateUserRequest:
+      type: object
+      properties:
+        status:
+          type: string
+        quotaBytes:
+          minimum: 0
+          type: integer
+          format: int64
+        role:
+          type: string
+        nickname:
+          type: string
+        email:
+          type: string
+    UpdateConfigRequest:
+      type: object
+      properties:
+        freeBytes:
+          minimum: 0
+          type: integer
+          format: int64
+        pricePerGbMonthCents:
+          minimum: 0
+          type: integer
+          format: int32
+        empty:
+          type: boolean
+    ConfigView:
+      type: object
+      properties:
+        freeBytes:
+          type: integer
+          format: int64
+        pricePerGbMonthCents:
+          type: integer
+          format: int32
+        note:
+          type: string
+    ResultConfigView:
+      type: object
+      properties:
+        code:
+          type: integer
+          format: int32
+        message:
+          type: string
+        data:
+          $ref: "#/components/schemas/ConfigView"
+    PatchReleaseRequest:
+      type: object
+      properties:
+        rolloutPercent:
+          type: integer
+          format: int32
+        forceUpdate:
+          type: boolean
+        updateNotes:
+          type: string
+        minForceCode:
+          type: integer
+          format: int32
+    PageObject:
+      type: object
+      properties:
+        totalElements:
+          type: integer
+          format: int64
+        totalPages:
+          type: integer
+          format: int32
+        size:
+          type: integer
+          format: int32
+        content:
+          type: array
+          items:
+            type: object
+        number:
+          type: integer
+          format: int32
+        sort:
+          type: array
+          items:
+            $ref: "#/components/schemas/SortObject"
+        first:
+          type: boolean
+        last:
+          type: boolean
+        numberOfElements:
+          type: integer
+          format: int32
+        pageable:
+          $ref: "#/components/schemas/PageableObject"
+        empty:
+          type: boolean
+    PageableObject:
+      type: object
+      properties:
+        offset:
+          type: integer
+          format: int64
+        sort:
+          type: array
+          items:
+            $ref: "#/components/schemas/SortObject"
+        unpaged:
+          type: boolean
+        paged:
+          type: boolean
+        pageNumber:
+          type: integer
+          format: int32
+        pageSize:
+          type: integer
+          format: int32
+    ResultPageObject:
+      type: object
+      properties:
+        code:
+          type: integer
+          format: int32
+        message:
+          type: string
+        data:
+          $ref: "#/components/schemas/PageObject"
+    SortObject:
+      type: object
+      properties:
+        direction:
+          type: string
+        nullHandling:
+          type: string
+        ascending:
+          type: boolean
+        property:
+          type: string
+        ignoreCase:
+          type: boolean
+    ResultUploadTaskPage:
+      type: object
+      properties:
+        code:
+          type: integer
+          format: int32
+        message:
+          type: string
+        data:
+          $ref: "#/components/schemas/UploadTaskPage"
+    UploadTaskInfo:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        sizeBytes:
+          type: integer
+          format: int64
+        status:
+          type: string
+        fileId:
+          type: integer
+          format: int64
+        createdAt:
+          type: string
+          format: date-time
+    UploadTaskPage:
+      type: object
+      properties:
+        list:
+          type: array
+          items:
+            $ref: "#/components/schemas/UploadTaskInfo"
+        total:
+          type: integer
+          format: int64
+        page:
+          type: integer
+          format: int32
+        size:
+          type: integer
+          format: int32
+    PartInfo:
+      type: object
+      properties:
+        partNumber:
+          type: integer
+          format: int32
+        size:
+          type: integer
+          format: int64
+    ResultSessionStatus:
+      type: object
+      properties:
+        code:
+          type: integer
+          format: int32
+        message:
+          type: string
+        data:
+          $ref: "#/components/schemas/SessionStatus"
+    SessionStatus:
+      type: object
+      properties:
+        sessionId:
+          type: integer
+          format: int64
+        status:
+          type: string
+        uploadId:
+          type: string
+        chunkSize:
+          type: integer
+          format: int32
+        uploadedParts:
+          type: array
+          items:
+            type: integer
+            format: int32
+        partsDetail:
+          type: array
+          items:
+            $ref: "#/components/schemas/PartInfo"
+    ResultStatsOverview:
+      type: object
+      properties:
+        code:
+          type: integer
+          format: int32
+        message:
+          type: string
+        data:
+          $ref: "#/components/schemas/StatsOverview"
+    StatsOverview:
+      type: object
+      properties:
+        totalFiles:
+          type: integer
+          format: int64
+        totalDirs:
+          type: integer
+          format: int64
+        totalBytes:
+          type: integer
+          format: int64
+        todayNew:
+          type: integer
+          format: int64
+        recycleCount:
+          type: integer
+          format: int64
+        recycleBytes:
+          type: integer
+          format: int64
+        typeBreakdown:
+          type: array
+          items:
+            $ref: "#/components/schemas/TypeCount"
+    TypeCount:
+      type: object
+      properties:
+        ext:
+          type: string
+        count:
+          type: integer
+          format: int64
+        bytes:
+          type: integer
+          format: int64
+    BreadcrumbItem:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+    DirListResponse:
+      type: object
+      properties:
+        total:
+          type: integer
+          format: int64
+        list:
+          type: array
+          items:
+            $ref: "#/components/schemas/FileNodeVO"
+        breadcrumb:
+          type: array
+          items:
+            $ref: "#/components/schemas/BreadcrumbItem"
+    ResultDirListResponse:
+      type: object
+      properties:
+        code:
+          type: integer
+          format: int32
+        message:
+          type: string
+        data:
+          $ref: "#/components/schemas/DirListResponse"
+    PageResultRecycleItemVO:
+      type: object
+      properties:
+        total:
+          type: integer
+          format: int64
+        list:
+          type: array
+          items:
+            $ref: "#/components/schemas/RecycleItemVO"
+    RecycleItemVO:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        parentId:
+          type: integer
+          format: int64
+        name:
+          type: string
+        isDir:
+          type: boolean
+        size:
+          type: integer
+          format: int64
+        deletedAt:
+          type: string
+          format: date-time
+        expireAt:
+          type: string
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    ResultPageResultRecycleItemVO:
+      type: object
+      properties:
+        code:
+          type: integer
+          format: int32
+        message:
+          type: string
+        data:
+          $ref: "#/components/schemas/PageResultRecycleItemVO"
+    QuotaView:
+      type: object
+      properties:
+        freeBytes:
+          type: integer
+          format: int64
+        extraBytes:
+          type: integer
+          format: int64
+        extraExpireAt:
+          type: string
+          format: date-time
+        usedBytes:
+          type: integer
+          format: int64
+        uploadBlocked:
+          type: boolean
+    ResultQuotaView:
+      type: object
+      properties:
+        code:
+          type: integer
+          format: int32
+        message:
+          type: string
+        data:
+          $ref: "#/components/schemas/QuotaView"
+    OrderItem:
+      type: object
+      properties:
+        column:
+          type: string
+        asc:
+          type: boolean
+    PageRequestView:
+      type: object
+      properties:
+        records:
+          type: array
+          items:
+            $ref: "#/components/schemas/RequestView"
+        total:
+          type: integer
+          format: int64
+        size:
+          type: integer
+          format: int64
+        current:
+          type: integer
+          format: int64
+        orders:
+          type: array
+          writeOnly: true
+          items:
+            $ref: "#/components/schemas/OrderItem"
+        optimizeCountSql:
+          $ref: "#/components/schemas/PageRequestView"
+        searchCount:
+          $ref: "#/components/schemas/PageRequestView"
+        optimizeJoinOfCountSql:
+          type: boolean
+          writeOnly: true
+        maxLimit:
+          type: integer
+          format: int64
+          writeOnly: true
+        countId:
+          type: string
+          writeOnly: true
+        pages:
+          type: integer
+          format: int64
+    RequestView:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        userId:
+          type: integer
+          format: int64
+        username:
+          type: string
+        gbCount:
+          type: integer
+          format: int32
+        amountCents:
+          type: integer
+          format: int64
+        status:
+          type: string
+        remark:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        handledAt:
+          type: string
+          format: date-time
+    ResultPageRequestView:
+      type: object
+      properties:
+        code:
+          type: integer
+          format: int32
+        message:
+          type: string
+        data:
+          $ref: "#/components/schemas/PageRequestView"
+    AuditLogVO:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        userId:
+          type: integer
+          format: int64
+        username:
+          type: string
+        action:
+          type: string
+        target:
+          type: string
+        ip:
+          type: string
+        detail:
+          type: string
+        status:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+    PageResultAuditLogVO:
+      type: object
+      properties:
+        total:
+          type: integer
+          format: int64
+        list:
+          type: array
+          items:
+            $ref: "#/components/schemas/AuditLogVO"
+    ResultPageResultAuditLogVO:
+      type: object
+      properties:
+        code:
+          type: integer
+          format: int32
+        message:
+          type: string
+        data:
+          $ref: "#/components/schemas/PageResultAuditLogVO"
+    AppUpdateInfo:
+      type: object
+      properties:
+        versionCode:
+          type: integer
+          format: int32
+        versionName:
+          type: string
+        apkUrl:
+          type: string
+        fileSize:
+          type: integer
+          format: int64
+        fileHash:
+          type: string
+        forceUpdate:
+          type: boolean
+        updateNotes:
+          type: string
+    AppUpdateVO:
+      type: object
+      properties:
+        hasUpdate:
+          type: boolean
+        update:
+          $ref: "#/components/schemas/AppUpdateInfo"
+    ResultAppUpdateVO:
+      type: object
+      properties:
+        code:
+          type: integer
+          format: int32
+        message:
+          type: string
+        data:
+          $ref: "#/components/schemas/AppUpdateVO"
+    PageUser:
+      type: object
+      properties:
+        totalElements:
+          type: integer
+          format: int64
+        totalPages:
+          type: integer
+          format: int32
+        size:
+          type: integer
+          format: int32
+        content:
+          type: array
+          items:
+            $ref: "#/components/schemas/User"
+        number:
+          type: integer
+          format: int32
+        sort:
+          type: array
+          items:
+            $ref: "#/components/schemas/SortObject"
+        first:
+          type: boolean
+        last:
+          type: boolean
+        numberOfElements:
+          type: integer
+          format: int32
+        pageable:
+          $ref: "#/components/schemas/PageableObject"
+        empty:
+          type: boolean
+    ResultPageUser:
+      type: object
+      properties:
+        code:
+          type: integer
+          format: int32
+        message:
+          type: string
+        data:
+          $ref: "#/components/schemas/PageUser"
+    User:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        username:
+          type: string
+        passwordHash:
+          type: string
+        role:
+          type: string
+        quotaBytes:
+          type: integer
+          format: int64
+        usedBytes:
+          type: integer
+          format: int64
+        status:
+          type: string
+        mustChangePassword:
+          type: boolean
+        nickname:
+          type: string
+        email:
+          type: string
+        lastLoginAt:
+          type: string
+          format: date-time
+        extraBytes:
+          type: integer
+          format: int64
+        extraExpireAt:
+          type: string
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        disabled:
+          type: boolean
+        admin:
+          type: boolean
+    ResultListTrafficPoint:
+      type: object
+      properties:
+        code:
+          type: integer
+          format: int32
+        message:
+          type: string
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/TrafficPoint"
+    TrafficPoint:
+      type: object
+      properties:
+        date:
+          type: string
+          format: date
+        uploadBytes:
+          type: integer
+          format: int64
+        downloadBytes:
+          type: integer
+          format: int64
+    ResultListTopUser:
+      type: object
+      properties:
+        code:
+          type: integer
+          format: int32
+        message:
+          type: string
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/TopUser"
+    TopUser:
+      type: object
+      properties:
+        userId:
+          type: integer
+          format: int64
+        username:
+          type: string
+        usedBytes:
+          type: integer
+          format: int64
+        quotaBytes:
+          type: integer
+          format: int64
+    AdminStatsOverview:
+      type: object
+      properties:
+        totalQuotaBytes:
+          type: integer
+          format: int64
+        usedBytes:
+          type: integer
+          format: int64
+        remainingBytes:
+          type: integer
+          format: int64
+        userCount:
+          type: integer
+          format: int64
+    ResultAdminStatsOverview:
+      type: object
+      properties:
+        code:
+          type: integer
+          format: int32
+        message:
+          type: string
+        data:
+          $ref: "#/components/schemas/AdminStatsOverview"
+    PageRecordView:
+      type: object
+      properties:
+        records:
+          type: array
+          items:
+            $ref: "#/components/schemas/RecordView"
+        total:
+          type: integer
+          format: int64
+        size:
+          type: integer
+          format: int64
+        current:
+          type: integer
+          format: int64
+        orders:
+          type: array
+          writeOnly: true
+          items:
+            $ref: "#/components/schemas/OrderItem"
+        optimizeCountSql:
+          $ref: "#/components/schemas/PageRecordView"
+        searchCount:
+          $ref: "#/components/schemas/PageRecordView"
+        optimizeJoinOfCountSql:
+          type: boolean
+          writeOnly: true
+        maxLimit:
+          type: integer
+          format: int64
+          writeOnly: true
+        countId:
+          type: string
+          writeOnly: true
+        pages:
+          type: integer
+          format: int64
+    RecordView:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        userId:
+          type: integer
+          format: int64
+        username:
+          type: string
+        gbCount:
+          type: integer
+          format: int32
+        amountCents:
+          type: integer
+          format: int64
+        appliedAt:
+          type: string
+          format: date-time
+        expireAt:
+          type: string
+          format: date-time
+        status:
+          type: string
+        requestId:
+          type: integer
+          format: int64
+        approvedBy:
+          type: integer
+          format: int64
+        approvedByName:
+          type: string
+    ResultPageRecordView:
+      type: object
+      properties:
+        code:
+          type: integer
+          format: int32
+        message:
+          type: string
+        data:
+          $ref: "#/components/schemas/PageRecordView"
+    PageAppRelease:
+      type: object
+      properties:
+        totalElements:
+          type: integer
+          format: int64
+        totalPages:
+          type: integer
+          format: int32
+        size:
+          type: integer
+          format: int32
+        content:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppRelease"
+        number:
+          type: integer
+          format: int32
+        sort:
+          type: array
+          items:
+            $ref: "#/components/schemas/SortObject"
+        first:
+          type: boolean
+        last:
+          type: boolean
+        numberOfElements:
+          type: integer
+          format: int32
+        pageable:
+          $ref: "#/components/schemas/PageableObject"
+        empty:
+          type: boolean
+    ResultPageAppRelease:
+      type: object
+      properties:
+        code:
+          type: integer
+          format: int32
+        message:
+          type: string
+        data:
+          $ref: "#/components/schemas/PageAppRelease"
+  securitySchemes:
+    internalKey:
+      type: apiKey
+      description: 门户 → 本产品的内部调用密钥（后端配置项 app.portal.internal-key）。仅作用于 /internal/**，未配置该密钥时后端拒绝一切内部调用（fail-closed）。
+      name: X-Internal-Key
+      in: header
+    bearerAuth:
+      type: http
+      description: 两种令牌都被接受：① 本系统自签 HS256（POST /api/auth/login 获取，管理端接口用这个）；② 门户签发的
+        RS256（业务路由用，后端按 JWKS 本地验签）。
+      scheme: bearer
+      bearerFormat: JWT

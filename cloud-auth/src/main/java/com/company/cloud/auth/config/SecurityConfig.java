@@ -52,7 +52,7 @@ public class SecurityConfig {
                 .requestMatchers("/auth/login", "/auth/refresh").permitAll()
                 .requestMatchers("/app/check-update").permitAll()
                 .requestMatchers("/downloads/**").permitAll()
-                .requestMatchers("/swagger-ui/**", "/swagger-ui.html", "/v3/api-docs/**").permitAll()
+                .requestMatchers("/swagger-ui/**", "/swagger-ui.html", "/v3/api-docs/**", "/v3/api-docs.yaml").permitAll()
                 // 门户内网接口：不走 JWT，改由 cloud-portal 的 InternalKeyFilter 校验 X-Internal-Key
                 .requestMatchers("/internal/**").permitAll()
                 .anyRequest().authenticated()

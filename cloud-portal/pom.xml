@@ -43,6 +43,12 @@
             <groupId>com.baomidou</groupId>
             <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
         </dependency>
+        <!-- Swagger/OpenAPI 注解（@Tag/@Operation/@Schema）。运行期的 UI 与 /v3/api-docs 由 cloud-app 提供，
+             这里只是让本模块的源码能编译注解；版本由根 pom 的 dependencyManagement 统一管理。 -->
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>
