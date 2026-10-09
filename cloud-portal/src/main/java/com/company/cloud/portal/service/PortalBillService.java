@@ -22,13 +22,22 @@ import java.util.List;
  * 如果先调门户再落库，一旦写完库前进程挂了，本侧没有账单记录、对面钱已扣，
  * 对账时这笔钱永远说不清。先落库，最坏情况是「有一笔待扣账单没扣成」，可修。
  *
- * <p>失败分流（契约 §4.3）：
+ * <p><b>失败分流</b>（契约 §4.3 + 平台侧 2026-10-09 补充）：
  * <ul>
- *   <li>{@code 0}    → status=1 已入账</li>
- *   <li>{@code 3003} → <b>当成功处理</b>，取首次结果，status=1</li>
- *   <li>{@code 3001} 余额不足 / {@code 3002} 钱包冻结 → <b>不重试</b>，保持 status=0 并记 fail_code</li>
- *   <li>网络超时 / 5xx → <b>用同一个 bill_no</b> 退避重试（默认 1s/5s/30s，共 3 次）</li>
+ *   <li>{@code 0} → status=1 已入账</li>
+ *   <li>{@code 3003} 幂等重复 → <b>当成功处理</b>，取首次结果，status=1</li>
+ *   <li>{@code 1002} 密钥无效 / {@code 1004} 密钥与账单声明不匹配 → <b>不重试 + 告警</b>。
+ *       这两个码重试毫无意义：1002 是配置错误（密钥没配/配错），1004 是代码 bug。
+ *       当成系统失败白退避 3 次（1s/5s/30s）只会拖慢告警，故显式归入业务失败。</li>
+ *   <li>{@code 3001} 余额不足 / {@code 3002} 钱包冻结 / {@code 3004} 超退 / {@code 3005} 原单不存在
+ *       → <b>不重试</b>，保持 status=0 并记 fail_code</li>
+ *   <li><b>网络超时 / 连接失败 / 非规范响应体的 4xx-5xx / 门户自报 {@code >=5000}</b>
+ *       → <b>用同一个 bill_no</b> 退避重试（默认 1s/5s/30s，共 3 次）</li>
  * </ul>
+ *
+ * <p>判定规则可一句话概括：<b>只有「系统类失败」才重试，一切 1xxx/3xxx 业务码都不重试</b>。
+ * 另外，门户若用非 2xx 状态码承载业务码（如 {@code 401 + {"code":1002}}），
+ * {@link PortalWalletClient} 会解析响应体并照样按业务码处理，不会误当成传输失败去重试。
  */
 @Slf4j
 @Service
@@ -102,17 +111,32 @@ public class PortalBillService {
                             billNo, amountCents, type, resp.code(), attempts);
                     return new ChargeResult(billNo, true, resp.code(), resp.message(), attempts);
                 }
-                if (resp.businessFailure()) {
-                    // 3001/3002：不重试，账单保持 0，走产品侧自己的宽限流程
-                    billMapper.updateResult(billNo, STATUS_PENDING, resp.code(), attempts);
-                    log.warn("[portal] 扣费业务失败（不重试）billNo={} portalCode={} msg={}",
-                            billNo, resp.code(), resp.message());
-                    return new ChargeResult(billNo, false, resp.code(), resp.message(), attempts);
+                if (resp.retryableSystemFailure()) {
+                    // 门户自报系统错误（>=5000）：与网络失败同等对待，用同一 billNo 退避重试
+                    if (attempts >= delays.size()) {
+                        billMapper.updateResult(billNo, STATUS_PENDING, resp.code(), attempts);
+                        log.error("[portal] 扣费门户系统错误已达重试上限 billNo={} portalCode={} retries={} msg={}",
+                                billNo, resp.code(), attempts, resp.message());
+                        return new ChargeResult(billNo, false, resp.code(), resp.message(), attempts);
+                    }
+                    int delay = delays.get(attempts);
+                    log.warn("[portal] 扣费门户系统错误({})，{} ms 后用同一 billNo 重试（第 {} 次）billNo={} msg={}",
+                            resp.code(), delay, attempts + 1, billNo, resp.message());
+                    sleepQuietly(delay);
+                    attempts++;
+                    continue;
                 }
-                // 其它未预期业务码：同样不重试，记录后交由人工/对账发现
+                // 其余全部是业务码：1002/1004（密钥类）、3001/3002（钱包类）及其它 1xxx/3xxx。
+                // 一律**不重试**——平台侧明确要求 1002/1004 不得当系统失败白退避 3 次。
                 billMapper.updateResult(billNo, STATUS_PENDING, resp.code(), attempts);
-                log.warn("[portal] 扣费返回未预期码 billNo={} portalCode={} msg={}",
-                        billNo, resp.code(), resp.message());
+                if (resp.credentialFailure()) {
+                    log.error("[portal] 【需人工介入】扣费被门户拒绝 billNo={} portalCode={}（{}）msg={}"
+                                    + " —— 请核对 PORTAL_INTERNAL_KEY 与 PORTAL_PRODUCT_CODE 是否匹配密钥归属",
+                            billNo, resp.code(), resp.describe(), resp.message());
+                } else {
+                    log.warn("[portal] 扣费业务失败（不重试）billNo={} portalCode={}（{}）msg={}",
+                            billNo, resp.code(), resp.describe(), resp.message());
+                }
                 return new ChargeResult(billNo, false, resp.code(), resp.message(), attempts);
 
             } catch (PortalTransportException e) {
@@ -171,8 +195,7 @@ public class PortalBillService {
         int attempts = 0;
         while (true) {
             try {
-                PortalApiResponse resp = walletClient.refund(originalBillNo, refundBillNo, amountCents,
-                        reason, original.getPortalUserId());
+                PortalApiResponse resp = walletClient.refund(originalBillNo, refundBillNo, amountCents, reason);
                 if (resp.success()) {
                     billMapper.updateResult(refundBillNo, STATUS_SETTLED, null, attempts);
                     // 退清则原单置为已退款（部分退款时原单保持已入账）
@@ -183,10 +206,31 @@ public class PortalBillService {
                             originalBillNo, refundBillNo, amountCents, attempts);
                     return new RefundResult(refundBillNo, true, resp.code(), resp.message());
                 }
-                // 3004 / 3005 等业务失败：不重试
+                if (resp.retryableSystemFailure()) {
+                    if (attempts >= delays.size()) {
+                        billMapper.updateResult(refundBillNo, STATUS_PENDING, resp.code(), attempts);
+                        log.error("[portal] 退款门户系统错误已达重试上限 refundBillNo={} portalCode={} retries={}",
+                                refundBillNo, resp.code(), attempts);
+                        return new RefundResult(refundBillNo, false, resp.code(),
+                                "退款门户系统错误，已重试 " + attempts + " 次：" + resp.message());
+                    }
+                    int delay = delays.get(attempts);
+                    log.warn("[portal] 退款门户系统错误({})，{} ms 后用同一 refundBillNo 重试（第 {} 次）",
+                            resp.code(), delay, attempts + 1);
+                    sleepQuietly(delay);
+                    attempts++;
+                    continue;
+                }
+                // 业务码一律不重试：1004（密钥与账单不匹配）、3004（超退）、3005（原单不存在）等
                 billMapper.updateResult(refundBillNo, STATUS_PENDING, resp.code(), attempts);
-                log.warn("[portal] 退款业务失败（不重试）refundBillNo={} portalCode={} msg={}",
-                        refundBillNo, resp.code(), resp.message());
+                if (resp.credentialFailure()) {
+                    log.error("[portal] 【需人工介入】退款被门户拒绝 refundBillNo={} portalCode={}（{}）msg={}"
+                                    + " —— 1004 表示密钥与账单声明不匹配，属代码问题，重试无用",
+                            refundBillNo, resp.code(), resp.describe(), resp.message());
+                } else {
+                    log.warn("[portal] 退款业务失败（不重试）refundBillNo={} portalCode={}（{}）msg={}",
+                            refundBillNo, resp.code(), resp.describe(), resp.message());
+                }
                 return new RefundResult(refundBillNo, false, resp.code(), resp.message());
 
             } catch (PortalTransportException e) {
