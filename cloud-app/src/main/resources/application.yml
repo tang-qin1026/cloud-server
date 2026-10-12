@@ -116,6 +116,9 @@ app:
     product-code: ${PORTAL_PRODUCT_CODE:storage}
     base-url: ${PORTAL_BASE_URL:http://localhost:3000}
     internal-key: ${PORTAL_INTERNAL_KEY:}
+    # 登录回落门户的超时（改造说明 §4.1）：登录是同步交互，
+    # 若挂 HTTP 客户端默认值（可能几十秒）用户会以为页面卡死，故显式设置且比内网计费更短
+    login-timeout-ms: ${PORTAL_LOGIN_TIMEOUT_MS:3000}
     # 出站路径：扣费/退款在门户侧是 /api/wallet/*（不在 /api/internal/ 下），
     # 只有对账上报在 /api/internal/ 下。依据门户 OpenAPI 校准，写错会 404。
     wallet-deduct-path: ${PORTAL_WALLET_DEDUCT_PATH:/api/wallet/deduct}
