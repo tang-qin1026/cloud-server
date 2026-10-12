@@ -30,11 +30,18 @@ public class PortalProperties {
      */
     private String internalKey = "";
 
-    /** 钱包扣费路径（相对 baseUrl）。 */
-    private String walletDeductPath = "/api/internal/wallet/deduct";
+    /**
+     * 钱包扣费路径（相对 baseUrl）。
+     *
+     * <p>注意：门户侧扣费/退款挂在 {@code /api/wallet/*}，<b>不在 {@code /api/internal/} 下</b>；
+     * 只有对账上报才在 {@code /api/internal/} 下。
+     * 此处默认值依据门户 OpenAPI（{@code GET {portal}/api/docs-json}）校准，
+     * 勿凭直觉加 internal —— 曾因写成 /api/internal/wallet/deduct 导致出站调用 404。
+     */
+    private String walletDeductPath = "/api/wallet/deduct";
 
-    /** 钱包退款路径。 */
-    private String walletRefundPath = "/api/internal/wallet/refund";
+    /** 钱包退款路径（同扣费，{@code /api/wallet/*}）。 */
+    private String walletRefundPath = "/api/wallet/refund";
 
     /** 账单对账上报路径（契约 §6 明确为 /api/internal/reconciliation/report）。 */
     private String reconciliationPath = "/api/internal/reconciliation/report";

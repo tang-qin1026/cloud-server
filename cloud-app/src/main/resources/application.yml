@@ -116,8 +116,10 @@ app:
     product-code: ${PORTAL_PRODUCT_CODE:storage}
     base-url: ${PORTAL_BASE_URL:http://localhost:3000}
     internal-key: ${PORTAL_INTERNAL_KEY:}
-    wallet-deduct-path: ${PORTAL_WALLET_DEDUCT_PATH:/api/internal/wallet/deduct}
-    wallet-refund-path: ${PORTAL_WALLET_REFUND_PATH:/api/internal/wallet/refund}
+    # 出站路径：扣费/退款在门户侧是 /api/wallet/*（不在 /api/internal/ 下），
+    # 只有对账上报在 /api/internal/ 下。依据门户 OpenAPI 校准，写错会 404。
+    wallet-deduct-path: ${PORTAL_WALLET_DEDUCT_PATH:/api/wallet/deduct}
+    wallet-refund-path: ${PORTAL_WALLET_REFUND_PATH:/api/wallet/refund}
     reconciliation-path: ${PORTAL_RECONCILIATION_PATH:/api/internal/reconciliation/report}
     connect-timeout-ms: ${PORTAL_CONNECT_TIMEOUT_MS:3000}
     read-timeout-ms: ${PORTAL_READ_TIMEOUT_MS:10000}
