@@ -17,7 +17,7 @@ import java.util.List;
  * 按量计费（billing_mode=2）后付费出账（契约 §3.1 / §8 自检项）。
  *
  * <p>计费口径（**需业务确认**）：按 SKU 自身公示的 {@code price_cents} 作为一个计费周期
- * （{@code period_days}）的费用，每个周期对每笔在期开通记录出账一次，
+ * （{@code period_hours}，单位**小时**）的费用，每个周期对每笔在期开通记录出账一次，
  * 金额 = 单价 × quantity。出账即走 {@link PortalBillService#charge}（先落库再扣费）。
  *
  * <p>因为「按量后付」的真实计价规则（按实际用量？按峰值？按天摊？）尚未由业务方定义，

@@ -38,7 +38,7 @@ public class PortalProductService {
                     parseSpec(row.getSkuId(), row.getSpecJson()),
                     row.getPriceCents(),
                     row.getBillingMode(),
-                    row.getPeriodDays(),
+                    row.getPeriodHours(),
                     row.getStock()));
         }
         return new ProductListVO(items);

@@ -22,7 +22,7 @@ public interface PortalProductSkuMapper extends BaseMapper<PortalProductSku> {
      */
     @Select("""
             SELECT sku_id, name, spec::text AS spec_json, price_cents,
-                   billing_mode, period_days, stock
+                   billing_mode, period_hours, stock
             FROM portal_product_sku
             WHERE is_active = TRUE
             ORDER BY sort_no, id
@@ -34,7 +34,7 @@ public interface PortalProductSkuMapper extends BaseMapper<PortalProductSku> {
      * 取不到即视为「sku 不存在/已下架」，门户侧对应 code=4003。
      */
     @Select("""
-            SELECT id, sku_id, name, price_cents, billing_mode, period_days, stock, quota_gb, is_active
+            SELECT id, sku_id, name, price_cents, billing_mode, period_hours, stock, quota_gb, is_active
             FROM portal_product_sku
             WHERE sku_id = #{skuId} AND is_active = TRUE
             """)

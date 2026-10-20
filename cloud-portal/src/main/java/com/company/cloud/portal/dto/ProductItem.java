@@ -33,9 +33,10 @@ public record ProductItem(
                 example = "1", allowableValues = {"1", "2"}, requiredMode = Schema.RequiredMode.REQUIRED)
         @JsonProperty("billing_mode") Integer billingMode,
 
-        @Schema(description = "周期天数。`billing_mode=1` 时**必填**；`billing_mode=2` 可为空",
-                example = "30")
-        @JsonProperty("period_days") Integer periodDays,
+        @Schema(description = "周期**小时**数。`billing_mode=1` 时**必填**；`billing_mode=2` 可为空。"
+                        + "单位=小时：1 天传 `24`，30 天传 `720`，3 小时传 `3`",
+                example = "720")
+        @JsonProperty("period_hours") Integer periodHours,
 
         @Schema(description = "库存。`null` 表示不限库存或未上报（前端显示「现货」）；云存储即不限库存",
                 example = "null", nullable = true)

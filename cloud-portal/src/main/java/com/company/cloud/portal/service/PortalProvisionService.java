@@ -57,6 +57,14 @@ public class PortalProvisionService {
     /** 单笔开通授予的配额上限（1 PiB）。防止 quota_gb 被误配成巨值时同样溢出。 */
     private static final long MAX_GRANTED_BYTES = 1L << 50;
 
+    /**
+     * 计费周期缺省值，单位<b>小时</b>：720 小时 = 30 天。
+     *
+     * <p>为什么不是 30：V2024 起 {@code period_hours} 的单位是小时，填 30 会变成 30 小时。
+     * 取 720 是为了保持改单位前「缺省 30 天」的语义——门户万一漏传周期，用户拿到的仍是 30 天。
+     */
+    private static final int DEFAULT_PERIOD_HOURS = 720;
+
     private final PortalProvisionMapper provisionMapper;
     private final PortalProductSkuMapper skuMapper;
     private final PortalShadowUserService shadowUserService;
@@ -107,9 +115,22 @@ public class PortalProvisionService {
             CurrentUser localUser = shadowUserService.resolveForProvision(req.portalUserId());
 
             long grantedBytes = computeGrantedBytes(sku, quantity);
-            int periodDays = req.periodDays() != null
-                    ? req.periodDays()
-                    : (sku.getPeriodDays() == null ? 30 : sku.getPeriodDays());
+
+            // ── 4b. 计费周期：单位=小时（V2024 起）────────────────────────
+            // 🚨 优先级**必须**是：period_hours > period_days×24 > SKU 自身周期 > 720
+            //    兼容期内门户会同时下发两个字段。若这里写反（把 period_days=30 当小时用），
+            //    会出现「用户买了 30 天、30 小时就到期」——严重客诉。
+            //    见《16 - 计费周期单位变更：天 → 小时》第 11.7 节。
+            Integer hoursFromReq = req.periodHours();
+            if (hoursFromReq == null && req.periodDays() != null) {
+                hoursFromReq = req.periodDays() * 24;
+                log.warn("[portal] 开通入参只带 period_days={}，按 ×24 兜底为 {} 小时。"
+                                + "请门户确认兼容分支（过渡期结束后应只发 period_hours）",
+                        req.periodDays(), hoursFromReq);
+            }
+            int periodHours = hoursFromReq != null
+                    ? hoursFromReq
+                    : (sku.getPeriodHours() == null ? DEFAULT_PERIOD_HOURS : sku.getPeriodHours());
 
             // ── 5. 先落库（铁律 2）：唯一索引兜底并发 ─────────────────────
             PortalProvision record = new PortalProvision();
@@ -118,7 +139,7 @@ public class PortalProvisionService {
             record.setLocalUserId(localUser.getId());
             record.setSkuId(req.skuId());
             record.setQuantity(quantity);
-            record.setPeriodDays(periodDays);
+            record.setPeriodHours(periodHours);
             record.setGrantedBytes(grantedBytes);
             record.setStatus(STATUS_PENDING);
             record.setQuotaReclaimed(false);
@@ -153,7 +174,9 @@ public class PortalProvisionService {
             }
 
             String instanceId = "st-" + String.format("%06d", record.getId());
-            OffsetDateTime expireAt = OffsetDateTime.now().plusDays(periodDays);
+            // 到期时间按**小时**推进（V2024 起）：720 小时 = 30 天，3 小时 = 3 小时。
+            // 注意宽限期（grace）仍是「天」，不在这里，见 PortalProvisionMapper.markDueAsGrace。
+            OffsetDateTime expireAt = OffsetDateTime.now().plusHours(periodHours);
 
             // ── 8. 收敛为 active ─────────────────────────────────────────
             if (provisionMapper.finalizeActive(req.orderItemId(), instanceId, expireAt) == 0) {

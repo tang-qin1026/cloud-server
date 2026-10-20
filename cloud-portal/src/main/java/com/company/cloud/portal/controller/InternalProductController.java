@@ -68,7 +68,7 @@ public class InternalProductController {
                                             "spec": {"quota_gb": 100, "transfer": "unlimited", "period": "30天"},
                                             "price_cents": 10000,
                                             "billing_mode": 1,
-                                            "period_days": 30,
+                                            "period_hours": 720,
                                             "stock": null
                                           },
                                           {
@@ -77,7 +77,7 @@ public class InternalProductController {
                                             "spec": {"quota_gb": 500, "transfer": "unlimited", "period": "30天"},
                                             "price_cents": 50000,
                                             "billing_mode": 1,
-                                            "period_days": 30,
+                                            "period_hours": 720,
                                             "stock": null
                                           }
                                         ]

@@ -66,7 +66,9 @@ public class InternalProvisionController {
                     ### 入参约束
                     - `quantity`：**1~1000**（缺省 1）。越界返回 `5001`，不会误授予资源。
                     - 单笔授予总量上限 1 PiB。
-                    - `period_days`：不传则用 SKU 自身的 `period_days`。
+                    - `period_hours`：计费周期，单位**小时**（1 天传 `24`，30 天传 `720`，3 小时传 `3`）。
+                      不传时依次回退：兼容字段 `period_days` × 24 → SKU 自身周期 → `720`。
+                    - `period_days`：**兼容字段（单位=天，已弃用）**，仅在门户尚未升级时兜底使用，会打 WARN 日志。
                     """,
             security = @SecurityRequirement(name = OpenApiConfig.SEC_INTERNAL_KEY),
             requestBody = @RequestBody(required = true, description = "开通请求（字段名 snake_case）",
@@ -77,7 +79,7 @@ public class InternalProvisionController {
                                       "portal_user_id": "018f3a2b-7c1d-7000-9e21-3f9a2b8c1d00",
                                       "sku_id": "storage-500g",
                                       "quantity": 1,
-                                      "period_days": 30
+                                      "period_hours": 720
                                     }
                                     """),
                             @ExampleObject(name = "带 extra（原样落库）", value = """
@@ -86,7 +88,7 @@ public class InternalProvisionController {
                                       "portal_user_id": "018f3a2b-7c1d-7000-9e21-3f9a2b8c1d00",
                                       "sku_id": "storage-100g",
                                       "quantity": 2,
-                                      "period_days": 90,
+                                      "period_hours": 2160,
                                       "extra": {"渠道": "小程序", "orderNo": "A-1"}
                                     }
                                     """)

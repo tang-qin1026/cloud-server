@@ -36,7 +36,8 @@ public class PortalProductSku {
     /** 1 包周期 / 2 按量。 */
     private Integer billingMode;
 
-    private Integer periodDays;
+    /** 计费周期（**小时**）。1 天 = 24，30 天 = 720；billing_mode=1 必填。 */
+    private Integer periodHours;
 
     /** NULL = 不限库存。 */
     private Integer stock;

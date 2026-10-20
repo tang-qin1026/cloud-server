@@ -102,12 +102,17 @@ public interface PortalProvisionMapper extends BaseMapper<PortalProvision> {
             """)
     int markExpired(@Param("id") Long id);
 
-    /** 按量计费候选：active 且（从未出账 或 已超过一个计费周期）。 */
+    /**
+     * 按量计费候选：active 且（从未出账 或 已超过一个计费周期）。
+     *
+     * <p>周期单位是**小时**（V2024 起）。这里用 {@code period_hours * INTERVAL '1 hour'}；
+     * 切勿改回 {@code '1 day'}——那会把「720 小时」当成 720 天。
+     */
     @Select("""
             SELECT * FROM portal_provision
             WHERE status = 'active'
               AND (last_billed_at IS NULL
-                   OR last_billed_at <= #{now} - (period_days * INTERVAL '1 day'))
+                   OR last_billed_at <= #{now} - (period_hours * INTERVAL '1 hour'))
             ORDER BY id
             LIMIT #{limit}
             """)

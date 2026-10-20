@@ -19,7 +19,8 @@ public class ProductRow {
 
     private Integer billingMode;
 
-    private Integer periodDays;
+    /** 计费周期（小时）。1 天 = 24，30 天 = 720。 */
+    private Integer periodHours;
 
     private Integer stock;
 }

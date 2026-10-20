@@ -27,7 +27,14 @@ public record ProvisionRequest(
                 example = "1", minimum = "1", maximum = "1000", defaultValue = "1")
         @JsonProperty("quantity") Integer quantity,
 
-        @Schema(description = "周期天数。不传则用该 SKU 自身的 `period_days`",
+        @Schema(description = "周期**小时**数（**优先使用本字段**，单位=小时：1 天传 `24`，30 天传 `720`，3 小时传 `3`）。"
+                        + "不传时按「`period_days` ×24 → 该 SKU 自身周期 → 720」的顺序兜底",
+                example = "720")
+        @JsonProperty("period_hours") Integer periodHours,
+
+        @Schema(description = "**兼容字段，单位=天，已弃用**。仅当门户尚未升级、只下发本字段时用于兜底："
+                        + "本侧会按 ×24 换算成小时并打 WARN 日志。"
+                        + "**不要与 `period_hours` 同时填**；两个都填时以 `period_hours` 为准",
                 example = "30")
         @JsonProperty("period_days") Integer periodDays,
 
