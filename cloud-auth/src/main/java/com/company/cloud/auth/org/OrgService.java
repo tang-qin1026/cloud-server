@@ -1,0 +1,544 @@
+package com.company.cloud.auth.org;
+
+import com.company.cloud.auth.org.mapper.OrgQueryMapper;
+import com.company.cloud.auth.org.mapper.OrgWriteMapper;
+import org.springframework.transaction.annotation.Transactional;
+import com.company.cloud.auth.rbac.mapper.RbacQueryMapper;
+import com.company.cloud.auth.security.CurrentUser;
+import com.company.cloud.common.result.BizException;
+import com.company.cloud.common.result.ErrorCode;
+import com.company.cloud.common.tenant.TenantContext;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Service;
+
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+/**
+ * 组织与权限查询（M3 只读部分）。
+ *
+ * <p><b>租户边界统一在这里决策</b>，不让 Controller 各自判断：
+ * <ul>
+ *   <li>平台管理员（{@link TenantContext#isBypass()}）→ {@code entId = null}，跨企业</li>
+ *   <li>企业 / 个人域用户 → {@code entId = TenantContext.require()}</li>
+ * </ul>
+ *
+ * <p>数据范围（{@code data_scope}）在本类只做**展示**；拦截真正落到 SQL 是在各业务查询里
+ * 拼 {@code dept.path LIKE} / {@code owner_id IN (...)}（见实现文档 v3 §5.2）。
+ */
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class OrgService {
+
+    private final OrgQueryMapper orgMapper;
+    private final OrgWriteMapper orgWriteMapper;
+    private final RbacQueryMapper rbacMapper;
+    private final com.company.cloud.auth.rbac.RbacService rbacService;
+
+    // ── 当前用户上下文 ───────────────────────────────────────────
+
+    /**
+     * {@code GET /me/context}：一次拿到「我是谁、属于哪、能做什么」。
+     *
+     * <p>前端据此渲染菜单与按钮，不再自己探测角色。
+     */
+    public Map<String, Object> meContext(CurrentUser cu) {
+        Long entId = tenantIdForRead();
+
+        Map<String, Object> me = new LinkedHashMap<>();
+        me.put("userId", cu.getId());
+        me.put("username", cu.getUsername());
+        me.put("role", cu.getRole());
+
+        Map<String, Object> enterprise = null;
+        if (entId != null && entId != 0L) {
+            Map<String, Object> e = orgMapper.selectEnterpriseById(entId);
+            if (e != null) {
+                // ⚠️ 不能用 Map.of：expireAt / rejectReason 等列**允许为 NULL**，
+                // Map.of 遇到 null 值会抛 NPE，表现为接口 50000（真实踩过）。
+                Map<String, Object> em = new LinkedHashMap<>();
+                em.put("id", e.get("id"));
+                em.put("code", e.get("code"));
+                em.put("name", e.get("name"));
+                em.put("status", e.get("status"));
+                em.put("expireAt", e.get("expire_at"));
+                enterprise = em;
+            }
+        }
+        me.put("enterprise", enterprise);
+        me.put("enterpriseId", entId);
+        me.put("isEnterpriseAdmin", cu.isEnterpriseAdmin());
+        me.put("isPlatformAdmin", cu.isAdmin() && !cu.isEnterpriseAdmin());
+
+        // 部门与档位
+        List<Map<String, Object>> roles = rolesOf(cu);
+        me.put("roles", roles);
+        me.put("dataScope", currentDataScope(cu));
+        me.put("permissions", effectivePermissions(cu));
+        return me;
+    }
+
+    // ── 权限点字典 ───────────────────────────────────────────────
+
+    /** {@code GET /org/permissions}：40 个权限点，按 8 个分组。 */
+    public Map<String, Object> permissions() {
+        List<Map<String, Object>> all = orgMapper.selectAllPermissions();
+        Map<String, List<Map<String, Object>>> groups = new LinkedHashMap<>();
+        for (Map<String, Object> p : all) {
+            String g = String.valueOf(p.get("group_code"));
+            groups.computeIfAbsent(g, k -> new ArrayList<>()).add(Map.of(
+                    "code", p.get("code"),
+                    "name", p.get("name"),
+                    "highRisk", Boolean.TRUE.equals(p.get("high_risk"))));
+        }
+        return Map.of("total", all.size(), "groups", groups);
+    }
+
+    // ── 角色 ───────────────────────────────────────────────────
+
+    /** {@code GET /org/roles}：本企业角色（平台管理员看全部）。 */
+    public List<Map<String, Object>> roles() {
+        Long entId = tenantIdForRead();
+        // 企业首次访问时惰性创建 4 个内置角色（靠 uk_role_code 防并发生成两份）。
+        // 这是文档 §3.3-3 要求的行为，也是"角色由产品侧管理、门户不存角色"的落地方式。
+        if (entId != null && entId != 0L) {
+            rbacService.ensureEnterpriseRoles(entId);
+        }
+        List<Map<String, Object>> rows = orgMapper.selectRoles(entId);
+        List<Map<String, Object>> out = new ArrayList<>(rows.size());
+        for (Map<String, Object> r : rows) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("id", r.get("id"));
+            m.put("code", r.get("code"));
+            m.put("name", r.get("name"));
+            m.put("builtin", Boolean.TRUE.equals(r.get("builtin")));
+            m.put("status", r.get("status"));
+            m.put("permissionCount", r.get("perm_count"));
+            out.add(m);
+        }
+        return out;
+    }
+
+    private List<Map<String, Object>> rolesOf(CurrentUser cu) {
+        List<Map<String, Object>> all = roles();
+        Set<Long> mine = new LinkedHashSet<>(rgbs(orgMapper.selectUserRoleIds(cu.getId())));
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (Map<String, Object> r : all) {
+            Object id = r.get("id");
+            if (id != null && mine.contains(((Number) id).longValue())) {
+                out.add(Map.of("id", id, "code", r.get("code"), "name", r.get("name")));
+            }
+        }
+        return out;
+    }
+
+    // ── 部门树 ─────────────────────────────────────────────────
+
+    /**
+     * {@code GET /org/depts/tree}：扁平列表 + {@code path}，前端自行建树。
+     *
+     * <p>返回扁平的 {@code id/parentId} 而不是嵌套结构：前端建树更灵活，
+     * 且分页/搜索时不用反复展开。
+     */
+    public Map<String, Object> deptTree(String status) {
+        Long entId = tenantIdForRead();
+        List<Map<String, Object>> rows = orgMapper.selectDepts(entId, status);
+        List<Map<String, Object>> out = new ArrayList<>(rows.size());
+        for (Map<String, Object> d : rows) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("id", d.get("id"));
+            m.put("parentId", d.get("parent_id"));
+            m.put("name", d.get("name"));
+            m.put("path", d.get("path"));
+            m.put("status", d.get("status"));
+            m.put("sortNo", d.get("sort_no"));
+            out.add(m);
+        }
+        return Map.of("total", out.size(), "list", out);
+    }
+
+    // ── 成员列表 ───────────────────────────────────────────────
+
+    /** {@code GET /users}：成员列表（分页）。 */
+    public Map<String, Object> members(String keyword, String status, Long deptId, int page, int size) {
+        Long entId = tenantIdForRead();
+        int p = Math.max(page, 1);
+        int s = Math.min(Math.max(size, 1), 100);
+        long total = orgMapper.countMembers(entId, keyword, status, deptId);
+        List<Map<String, Object>> rows = orgMapper.selectMembers(
+                entId, keyword, status, deptId, s, (p - 1) * s);
+
+        List<Map<String, Object>> list = new ArrayList<>(rows.size());
+        for (Map<String, Object> u : rows) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("id", u.get("id"));
+            m.put("username", u.get("username"));
+            m.put("nickname", u.get("nickname"));
+            m.put("enterpriseId", u.get("enterprise_id"));
+            m.put("deptId", u.get("dept_id"));
+            m.put("deptName", u.get("dept_name"));
+            m.put("enterpriseRole", u.get("enterprise_role"));
+            m.put("dataScope", upperScope(str(u.get("data_scope"))));
+            m.put("status", u.get("status"));
+            m.put("lastLoginAt", u.get("last_login_at"));
+            list.add(m);
+        }
+        return Map.of("total", total, "list", list);
+    }
+
+    // ── 平台管理员：企业列表 ─────────────────────────────────────
+
+    /** {@code GET /admin/enterprises}：企业列表（仅平台管理员）。 */
+    public Map<String, Object> enterprises(String status, int page, int size) {
+        requirePlatformAdmin();
+        int p = Math.max(page, 1);
+        int s = Math.min(Math.max(size, 1), 100);
+        long total = orgMapper.countEnterprises(status);
+        List<Map<String, Object>> rows = orgMapper.selectEnterprises(status, s, (p - 1) * s);
+        List<Map<String, Object>> list = new ArrayList<>(rows.size());
+        for (Map<String, Object> e : rows) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("id", e.get("id"));
+            m.put("code", e.get("code"));
+            m.put("name", e.get("name"));
+            m.put("status", e.get("status"));
+            m.put("ownerUserId", e.get("owner_user_id"));
+            m.put("expireAt", e.get("expire_at"));
+            m.put("createdAt", e.get("created_at"));
+            list.add(m);
+        }
+        return Map.of("total", total, "list", list);
+    }
+
+    // ── 内部工具 ───────────────────────────────────────────────
+
+    /** 读操作的租户 id：平台管理员返回 null（跨企业），其余返回当前企业。 */
+    private Long tenantIdForRead() {
+        if (TenantContext.isBypass()) {
+            return null;
+        }
+        return TenantContext.require();
+    }
+
+    private void requirePlatformAdmin() {
+        if (!TenantContext.isBypass()) {
+            throw new BizException(ErrorCode.FORBIDDEN, "仅平台管理员可执行该操作");
+        }
+    }
+
+    private String currentDataScope(CurrentUser cu) {
+        if (TenantContext.isBypass()) {
+            return "ALL";
+        }
+        // 以库里的 data_scope 为准；CurrentUser 不含该字段，故从成员列表取本人一行
+        List<Map<String, Object>> rows = orgMapper.selectMembers(
+                TenantContext.require(), cu.getUsername(), null, null, 1, 0);
+        for (Map<String, Object> r : rows) {
+            if (String.valueOf(r.get("id")).equals(String.valueOf(cu.getId()))) {
+                return upperScope(str(r.get("data_scope")));
+            }
+        }
+        return "SELF";
+    }
+
+    /** 功能权限点（多角色并集；企业管理员/平台管理员 → 全量）。 */
+    private List<String> effectivePermissions(CurrentUser cu) {
+        if (cu.isAdmin() || cu.isEnterpriseAdmin()) {
+            return rbacMapper.selectAllPermCodes();
+        }
+        return rbacMapper.selectPermCodes(cu.getId());
+    }
+
+    private static String upperScope(String raw) {
+        if (raw == null) {
+            return "SELF";
+        }
+        return switch (raw) {
+            case "self" -> "SELF";
+            case "dept_subtree" -> "DEPT_AND_BELOW";
+            case "all" -> "ALL";
+            default -> raw.toUpperCase(java.util.Locale.ROOT);
+        };
+    }
+
+    private static String str(Object o) {
+        return o == null ? null : o.toString();
+    }
+
+    private static List<Long> rgbs(List<Long> in) {
+        return in == null ? List.of() : in;
+    }
+    // ── 成员配置：部门 + 角色 + 数据权限（三件套）─────────────────
+
+    /**
+     * 更新成员的组织配置。
+     *
+     * <p>三个字段**一起提交**：角色决定功能权限，数据权限决定可见范围，两者互不影响。
+     * 配置立即生效（授权数据不在 token 里，下次请求即按新配置判定）。
+     *
+     * @param roleIds {@code null} 表示不改角色；空列表表示清空角色
+     */
+    @Transactional
+    public void updateMember(CurrentUser cu, long userId,
+                             Long deptId, String dataScope, List<Long> roleIds) {
+        long entId = requireEnterpriseContext();
+        requirePerm(cu, "org.member.manage");
+
+        // 部门必须属于本企业（跨企业部门 id 一律拒绝，而不是静默写成 null）
+        if (deptId != null && orgWriteMapper.countDeptInEnterprise(deptId, entId) == 0) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "部门不属于本企业：" + deptId);
+        }
+
+        int n = orgWriteMapper.updateMemberScope(userId, entId, deptId, normalizeScope(dataScope));
+        if (n == 0) {
+            // 归属条件没过：要么用户不存在，要么不属于本企业 —— 统一按不存在处理
+            throw new BizException(ErrorCode.USER_NOT_FOUND);
+        }
+
+        if (roleIds != null) {
+            List<Long> allowed = orgWriteMapper.selectRoleIdsOfEnterprise(entId);
+            for (Long rid : roleIds) {
+                if (rid == null || !allowed.contains(rid)) {
+                    throw new BizException(ErrorCode.BAD_REQUEST, "角色不属于本企业：" + rid);
+                }
+            }
+            orgWriteMapper.clearUserRoles(userId);
+            if (!roleIds.isEmpty()) {
+                orgWriteMapper.addUserRoles(userId, roleIds);
+            }
+        }
+    }
+
+    // ── 资源分配 ───────────────────────────────────────────────
+
+    /** {@code GET /org/resources}：企业资源池。 */
+    public Map<String, Object> resources(CurrentUser cu) {
+        long entId = requireEnterpriseContext();
+        requireAnyPerm(cu, "org.member.read", "org.member.resource");
+        List<Map<String, Object>> rows = orgWriteMapper.selectResources(entId);
+        List<Map<String, Object>> out = new ArrayList<>(rows.size());
+        for (Map<String, Object> r : rows) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("id", r.get("id"));
+            m.put("skuId", r.get("sku_id"));
+            m.put("quotaGb", r.get("quota_gb"));
+            m.put("holderUserId", r.get("holder_user_id"));
+            m.put("assignedAt", r.get("assigned_at"));
+            out.add(m);
+        }
+        return Map.of("total", out.size(), "list", out);
+    }
+
+    /** {@code GET /users/{id}/resources}：某成员当前持有的资源。 */
+    public Map<String, Object> memberResources(CurrentUser cu, long userId) {
+        long entId = requireEnterpriseContext();
+        requireAnyPerm(cu, "org.member.read", "org.member.resource");
+        Set<Long> held = new LinkedHashSet<>(orgWriteMapper.selectResourceIdsHeldBy(entId, userId));
+        List<Map<String, Object>> list = new ArrayList<>();
+        for (Map<String, Object> r : orgWriteMapper.selectResources(entId)) {
+            Object idObj = r.get("id");
+            if (idObj != null && held.contains(((Number) idObj).longValue())) {
+                Map<String, Object> mm = new LinkedHashMap<>();
+                mm.put("id", idObj);
+                mm.put("skuId", r.get("sku_id"));
+                mm.put("quotaGb", r.get("quota_gb"));
+                list.add(mm);
+            }
+        }
+        return Map.of("total", list.size(), "list", list);
+    }
+
+    /**
+     * {@code PUT /users/{id}/resources}：**整体覆盖**该成员的资源持有列表。
+     *
+     * <p>差集即动作：新列表里有、原本没有 → 分配；原本有、新列表没有 → 收回。
+     * 收回不是删除资源，而是把持有人改回**企业主管理员**
+     * （资源归人不归企业，且 {@code holder_user_id} 是 NOT NULL，所以不存在"无主"状态）。
+     */
+    @Transactional
+    public void assignResources(CurrentUser cu, long userId, List<Long> resourceIds) {
+        long entId = requireEnterpriseContext();
+        requirePerm(cu, "org.member.resource");
+
+        Long targetEnt = orgMapper.selectUserEnterpriseId(userId);
+        if (targetEnt == null || targetEnt != entId) {
+            throw new BizException(ErrorCode.USER_NOT_FOUND);
+        }
+
+        List<Long> want = resourceIds == null ? List.of() : resourceIds;
+        if (!want.isEmpty()
+                && orgWriteMapper.countResourcesInEnterprise(want, entId) != want.size()) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "存在不属于本企业的资源");
+        }
+
+        Long owner = orgWriteMapper.selectEnterpriseOwner(entId);
+        // 兜底：企业尚未回填 owner 时，以企业 id 兜不住，直接报错更安全
+        if (owner == null) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "企业未设置主管理员（owner_user_id 为空）");
+        }
+
+        Set<Long> wantSet = new LinkedHashSet<>(want);
+        Set<Long> heldSet = new LinkedHashSet<>(orgWriteMapper.selectResourceIdsHeldBy(entId, userId));
+
+        for (Long rid : wantSet) {
+            if (!heldSet.contains(rid)) {
+                orgWriteMapper.updateHolder(rid, entId, userId, owner);
+            }
+        }
+        for (Long rid : heldSet) {
+            if (!wantSet.contains(rid)) {
+                orgWriteMapper.updateHolder(rid, entId, owner, owner);   // 收回 → 回到主管理员
+            }
+        }
+    }
+
+    // ── 权限与租户前置校验 ─────────────────────────────────────
+
+    /**
+     * 写操作必须落在**具体企业**里。
+     *
+     * <p>平台管理员与个人域账号都不能走组织写接口：前者会误改别家企业，
+     * 后者根本没有企业。
+     */
+    private long requireEnterpriseContext() {
+        if (TenantContext.isBypass()) {
+            throw new BizException(ErrorCode.FORBIDDEN, "该接口需要企业上下文：平台管理员/个人域账号不适用，请用企业账号或企业管理端访问");
+        }
+        long ent = TenantContext.require();
+        if (ent == 0L) {
+            throw new BizException(ErrorCode.FORBIDDEN, "该接口需要企业上下文：个人域账号不适用，请用企业账号访问");
+        }
+        return ent;
+    }
+
+    private void requirePerm(CurrentUser cu, String code) {
+        if (cu.isAdmin() || cu.isEnterpriseAdmin()) {
+            return;
+        }
+        if (!rbacMapper.selectPermCodes(cu.getId()).contains(code)) {
+            throw new BizException(ErrorCode.FORBIDDEN, "缺少权限：" + code);
+        }
+    }
+
+    private void requireAnyPerm(CurrentUser cu, String... codes) {
+        if (cu.isAdmin() || cu.isEnterpriseAdmin()) {
+            return;
+        }
+        List<String> mine = rbacMapper.selectPermCodes(cu.getId());
+        for (String c : codes) {
+            if (mine.contains(c)) {
+                return;
+            }
+        }
+        throw new BizException(ErrorCode.FORBIDDEN, "缺少权限：" + String.join(" / ", codes));
+    }
+
+    /** 对外档位名 → 库内小写值（与 V2025 的 CHECK 约束一致）。 */
+    private static String normalizeScope(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return "self";
+        }
+        return switch (raw.trim().toUpperCase(java.util.Locale.ROOT)) {
+            case "SELF" -> "self";
+            case "DEPT_AND_BELOW", "DEPT_SUBTREE" -> "dept_subtree";
+            case "ALL" -> "all";
+            default -> throw new BizException(ErrorCode.BAD_REQUEST, "数据范围非法：" + raw);
+        };
+    }
+    // ── 数据范围：可见的"他人" ──────────────────────────────────
+
+    /**
+     * {@code GET /files/others/owners}：当前用户按**数据范围**能看到哪些人。
+     *
+     * <p>语义（实现文档 §5.2）：
+     * <ul>
+     *   <li>{@code SELF} → 空列表（看不到任何他人）</li>
+     *   <li>{@code DEPT_AND_BELOW} → 本部门 + 所有下级部门的成员，**不含兄弟与上级**</li>
+     *   <li>{@code ALL} → 本企业全部成员</li>
+     * </ul>
+     *
+     * <p><b>注意这是"范围"而不是"权限"</b>：即使范围是 ALL，要真正查看他人文件，
+     * 仍需 {@code file.other.read} 功能权限。两个闸门是独立维度。
+     */
+    public Map<String, Object> visibleOwners(CurrentUser cu) {
+        long entId = requireEnterpriseContext();
+        String scope = currentDataScope(cu);          // 对外展示用（大写）
+        // ⚠️ SQL 里比较的是**库内小写值**（self / dept_subtree / all）。
+        // 之前直接把大写值传进 mapper，导致 <if test="scope == 'dept_subtree'"> 永远为假，
+        // 部门过滤被整段跳过、退化成"全企业可见"（真实踩过，已由 [4] 用例暴露）。
+        String dbScope = switch (scope) {
+            case "ALL" -> "all";
+            case "DEPT_AND_BELOW" -> "dept_subtree";
+            default -> "self";
+        };
+
+        if ("SELF".equals(scope)) {
+            return Map.of("scope", scope, "total", 0, "list", List.of());
+        }
+
+        String myPath = null;
+        if ("DEPT_AND_BELOW".equals(scope)) {
+            Map<String, Object> dp = orgMapper.selectUserDeptPath(cu.getId());
+            myPath = dp == null ? null : str(dp.get("path"));
+        }
+
+        List<Map<String, Object>> rows = orgMapper.selectVisibleOwners(entId, cu.getId(), dbScope, myPath);
+        List<Map<String, Object>> list = new ArrayList<>(rows.size());
+        for (Map<String, Object> u : rows) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("id", u.get("id"));
+            m.put("username", u.get("username"));
+            m.put("nickname", u.get("nickname"));
+            m.put("deptId", u.get("dept_id"));
+            m.put("deptName", u.get("dept_name"));
+            list.add(m);
+        }
+        return Map.of("scope", scope, "total", list.size(), "list", list);
+    }
+    /**
+     * 数据范围内可见的 {@code owner_id} 集合（**必含自己**）。
+     *
+     * <p>供业务查询拼 {@code owner_id IN (...)}：文件列表、审计、账单等都复用它，
+     * 保证"数据范围"只有一处实现。
+     *
+     * <p>返回 {@code List} 而不是直接拼 SQL：调用方用 MyBatis 的参数绑定，
+     * 不存在注入风险，也便于单测。
+     */
+    public List<Long> visibleOwnerIds(CurrentUser cu) {
+        List<Long> ids = new ArrayList<>();
+        ids.add(cu.getId());
+
+        // 平台管理员：保持既有行为（不按范围收窄）
+        if (TenantContext.isBypass() || !TenantContext.isPresent()) {
+            return ids;
+        }
+        long ent = TenantContext.require();
+        if (ent == 0L) {
+            return ids;                       // 个人域：只看自己
+        }
+
+        String scope = currentDataScope(cu);
+        if ("SELF".equals(scope)) {
+            return ids;
+        }
+        String dbScope = "ALL".equals(scope) ? "all" : "dept_subtree";
+        String myPath = null;
+        if ("dept_subtree".equals(dbScope)) {
+            Map<String, Object> dp = orgMapper.selectUserDeptPath(cu.getId());
+            myPath = dp == null ? null : str(dp.get("path"));
+        }
+        for (Map<String, Object> u : orgMapper.selectVisibleOwners(ent, cu.getId(), dbScope, myPath)) {
+            Object id = u.get("id");
+            if (id instanceof Number n) {
+                ids.add(n.longValue());
+            }
+        }
+        return ids;
+    }
+}

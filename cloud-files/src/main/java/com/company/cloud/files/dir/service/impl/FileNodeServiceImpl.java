@@ -16,6 +16,8 @@ import com.company.cloud.files.dir.entity.FileNode;
 import com.company.cloud.files.dir.mapper.FileNodeMapper;
 import com.company.cloud.files.dir.service.FileNodeService;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import com.company.cloud.auth.org.OrgService;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -25,7 +27,11 @@ import java.util.Map;
 
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class FileNodeServiceImpl implements FileNodeService {
+
+    /** M3 数据范围：把 owner_id = me 放宽成范围内可见的人。 */
+    private final OrgService orgService;
 
     /** 排序字段白名单（契约：禁止前端字段直接透传 SQL） */
     private static final Map<String, String> SORT_COLUMNS = Map.of(
@@ -48,8 +54,22 @@ public class FileNodeServiceImpl implements FileNodeService {
         }
 
         QueryWrapper<FileNode> qw = new QueryWrapper<>();
-        qw.eq("owner_id", userId)
-          .isNull("deleted_at");
+        // 数据范围（M3）：把 owner_id = me 放宽成 owner_id IN (范围内的人)。
+        // 范围只决定"看得到谁的数据"；能不能读他人文件仍要 file.other.read 功能权限（另一个闸门）。
+        java.util.List<Long> owners = resolveVisibleOwnerIds(userId);
+        if (owners.size() == 1) {
+            qw.eq("owner_id", owners.get(0));
+        } else {
+            qw.in("owner_id", owners);
+        }
+        // 租户条件（M4）：与 owner 条件并存，是**纵深防御**而非替代。
+        // 三个索引都以 enterprise_id 打头，因此这个条件同时是索引前缀，不会变慢。
+        // 平台管理员返回 null，不加该条件（需要跨企业视角）。
+        Long entFilter = resolveEnterpriseFilter();
+        if (entFilter != null) {
+            qw.eq("enterprise_id", entFilter);
+        }
+        qw.isNull("deleted_at");
         if (searching) {
             // 全局搜索：忽略 parent，全空间按名称模糊匹配；%/_ 转义防通配符注入
             qw.like("name", escapeLike(keyword.trim()));
@@ -78,8 +98,14 @@ public class FileNodeServiceImpl implements FileNodeService {
     @Override
     public List<FileNodeVO> tree(Long userId) {
         QueryWrapper<FileNode> qw = new QueryWrapper<>();
-        qw.eq("owner_id", userId)
-          .eq("is_dir", true)
+        qw.eq("owner_id", userId);
+        // 租户条件（M4）：目录树只取本人的目录，但显式带上企业条件做纵深防御，
+        // 且 enterprise_id 是索引前缀，命中更精确。
+        Long entFilter = resolveEnterpriseFilter();
+        if (entFilter != null) {
+            qw.eq("enterprise_id", entFilter);
+        }
+        qw.eq("is_dir", true)
           .isNull("deleted_at")
           .orderByAsc("name");
         return mapper.selectList(qw).stream().map(FileNodeVO::from).toList();
@@ -111,6 +137,7 @@ public class FileNodeServiceImpl implements FileNodeService {
 
         FileNode node = new FileNode();
         node.setOwnerId(userId);
+        node.setEnterpriseId(currentEnterpriseId());
         node.setParentId(parentId);
         node.setName(resolveUniqueName(userId, parentId, request.name().trim()));
         node.setIsDir(true);
@@ -254,5 +281,57 @@ public class FileNodeServiceImpl implements FileNodeService {
             i++;
         }
         return stem + " (" + i + ")" + ext;
+    }
+    /**
+     * 解析数据范围内可见的 owner id（含自己）。
+     *
+     * <p>从 SecurityContext 取 {@code CurrentUser} 而不是改方法签名——这样
+     * 所有既有调用点（含定时任务、内部调用）都不用动，改动面最小。
+     * 拿不到身份时**fail-closed**：只返回自己。
+     */
+    private java.util.List<Long> resolveVisibleOwnerIds(Long userId) {
+        try {
+            var auth = org.springframework.security.core.context.SecurityContextHolder
+                    .getContext().getAuthentication();
+            if (auth != null
+                    && auth.getPrincipal() instanceof com.company.cloud.auth.security.CurrentUser cu) {
+                return orgService.visibleOwnerIds(cu);
+            }
+        } catch (Exception e) {
+            log.warn("[scope] 解析数据范围失败，回退为仅自己 userId={} err={}", userId, e.toString());
+        }
+        return java.util.List.of(userId);
+    }
+    /**
+     * 当前租户 id（写入 {@code files.enterprise_id} 用）。
+     *
+     * <p>没有租户上下文时返回 0（个人域）——与列默认值一致，
+     * 也保证定时任务等系统路径不会写出脏值。
+     */
+    private static long currentEnterpriseId() {
+        try {
+            return com.company.cloud.common.tenant.TenantContext.isPresent()
+                    ? com.company.cloud.common.tenant.TenantContext.require()
+                    : 0L;
+        } catch (Exception e) {
+            return 0L;
+        }
+    }
+    /**
+     * 租户过滤值：{@code null} = 不加企业条件（平台管理员 / 无上下文）。
+     *
+     * <p>用于 MyBatis-Plus 的 QueryWrapper 读查询。**注意与 {@link #currentEnterpriseId()} 的区别**：
+     * 那个用于**写入**（必须有个具体值，默认 0），这个用于**读取**（null 表示不限制）。
+     */
+    private static Long resolveEnterpriseFilter() {
+        try {
+            if (com.company.cloud.common.tenant.TenantContext.isBypass()
+                    || !com.company.cloud.common.tenant.TenantContext.isPresent()) {
+                return null;
+            }
+            return com.company.cloud.common.tenant.TenantContext.require();
+        } catch (Exception e) {
+            return null;
+        }
     }
 }

@@ -6,6 +6,8 @@ import com.company.cloud.common.result.ErrorCode;
 import com.company.cloud.common.result.Result;
 import com.company.cloud.transfer.service.UploadService;
 import jakarta.servlet.http.HttpServletRequest;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotBlank;
 import org.springframework.http.MediaType;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
@@ -32,7 +34,7 @@ public class UploadController {
 
     /** R-B01/R-B02：初始化上传（含秒传分支）；返回 done 或 uploading + uploadId + chunkSize。 */
     @PostMapping("/uploads/init")
-    public Result<Map<String, Object>> init(@RequestBody InitRequest req, Authentication authentication) {
+    public Result<Map<String, Object>> init(@Valid @RequestBody InitRequest req, Authentication authentication) {
         UploadService.InitResult r = uploadService.init(
                 currentUserId(authentication), req.name(), req.size(), req.parentId(), req.sha256());
         if (r.done()) {
@@ -115,5 +117,18 @@ public class UploadController {
         throw new BizException(ErrorCode.TOKEN_INVALID);
     }
 
-    public record InitRequest(String name, long size, Long parentId, String sha256) { }
+    /**
+     * 上传初始化入参。
+     *
+     * <p><b>为什么必须加 {@code @NotBlank}</b>：{@code name} 在 {@code upload_sessions}
+     * 是 NOT NULL 列。原先没有参数校验，前端漏传/传错字段名（如 {@code fileName}）时，
+     * 会在 INSERT 阶段撞数据库非空约束 → 抛 DataIntegrityViolationException →
+     * 前端只看到 50000「系统繁忙」，既不知道是参数问题、也定位不到字段。
+     * 加上校验后统一由 {@code GlobalExceptionHandler} 返回 40000「请求参数错误」。
+     */
+    public record InitRequest(
+            @NotBlank(message = "缺少文件名 name") String name,
+            long size,
+            Long parentId,
+            String sha256) { }
 }

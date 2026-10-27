@@ -70,6 +70,8 @@ public enum ErrorCode {
     APP_VERSION_ALREADY_EXISTS(43109, "该版本号已存在，请更换或留空自动分配"),
 
     // ---- 系统 ----
+    /** 存储服务（MinIO/对象存储）不可用：连不上、超时、无路由。区别于 SYSTEM_ERROR，便于前端提示与运维定位 */
+    STORAGE_UNAVAILABLE(50001, "存储服务不可用，请稍后重试"),
     SYSTEM_ERROR(50000, "系统繁忙，请稍后重试");
     private final int code;
     private final String message;

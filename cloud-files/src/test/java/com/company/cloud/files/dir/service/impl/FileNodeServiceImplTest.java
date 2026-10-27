@@ -54,7 +54,9 @@ class FileNodeServiceImplTest {
 
     @BeforeEach
     void setUp() {
-        service = new FileNodeServiceImpl(mapper, auditService);
+        service = new FileNodeServiceImpl(
+                org.mockito.Mockito.mock(com.company.cloud.auth.org.OrgService.class),
+                mapper, auditService);
     }
 
     // ---------- R-C02 新建文件夹 ----------

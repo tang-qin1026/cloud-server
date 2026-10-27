@@ -24,6 +24,9 @@ public class FileNode {
     /** 所有者用户 ID */
     private Long ownerId;
 
+    /** 所属企业（M4）：0 = 个人域，与企业域隔离。 */
+    private Long enterpriseId;
+
     /** 父目录 ID，0 表示根目录 */
     private Long parentId;
 

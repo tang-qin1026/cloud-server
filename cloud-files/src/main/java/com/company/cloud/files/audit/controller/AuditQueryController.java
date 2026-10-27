@@ -37,6 +37,8 @@ import java.util.Map;
 public class AuditQueryController {
 
     private final AuditLogMapper auditLogMapper;
+    /** M3 数据范围：审计日志按范围限定可见的操作者。 */
+    private final com.company.cloud.auth.org.OrgService orgService;
 
     @Operation(summary = "分页查询审计日志（R-C09）：admin 全查，普通用户仅本人")
     @GetMapping
@@ -56,8 +58,19 @@ public class AuditQueryController {
             // 管理员：可按任意 userId 过滤，不传则全量
             qw.eq(userId != null, "user_id", userId);
         } else {
-            // 普通用户：强制只查自己，忽略传入的 userId
-            qw.eq("user_id", cu.getId());
+            // 普通用户：按**数据范围**限定可见的操作者（必含自己），忽略传入的 userId。
+            // 这样部门管理员（DEPT_AND_BELOW）能看到下级的审计，而 SELF 档仍然只看自己。
+            java.util.List<Long> scopeIds = orgService.visibleOwnerIds(cu);
+            if (scopeIds.size() == 1) {
+                qw.eq("user_id", scopeIds.get(0));
+            } else {
+                qw.in("user_id", scopeIds);
+            }
+        }
+        // 租户条件：审计表已带 enterprise_id（V2025），平台管理员不加（需跨企业）。
+        Long entFilter = resolveEnterpriseFilter();
+        if (entFilter != null) {
+            qw.eq("enterprise_id", entFilter);
         }
         qw.eq(action != null && !action.isBlank(), "action", action);
         qw.ge(start != null, "created_at", start);
@@ -92,5 +105,17 @@ public class AuditQueryController {
             return cu;
         }
         throw new BizException(ErrorCode.TOKEN_INVALID);
+    }
+    /** 租户过滤值：null = 不加条件（平台管理员 / 无上下文）。 */
+    private static Long resolveEnterpriseFilter() {
+        try {
+            if (com.company.cloud.common.tenant.TenantContext.isBypass()
+                    || !com.company.cloud.common.tenant.TenantContext.isPresent()) {
+                return null;
+            }
+            return com.company.cloud.common.tenant.TenantContext.require();
+        } catch (Exception e) {
+            return null;
+        }
     }
 }

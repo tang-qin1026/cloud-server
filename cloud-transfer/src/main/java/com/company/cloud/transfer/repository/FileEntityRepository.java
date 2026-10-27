@@ -8,7 +8,14 @@ import java.util.Optional;
 public interface FileEntityRepository extends JpaRepository<FileEntity, Long> {
 
     /** 秒传命中：同 sha256 的存活文件记录（内容寻址去重）。 */
-    Optional<FileEntity> findFirstBySha256AndDeletedAtIsNull(String sha256);
+        /**
+     * 秒传判定：**必须按企业隔离**。
+     *
+     * <p>原方法 {@code findFirstBySha256AndDeletedAtIsNull} 只按哈希查，
+     * 会把别家企业上传过的内容当成"本企业已存在"→ 跨企业复用同一对象，
+     * 且 ref_count 共享（一方彻底删除可能影响另一方）。按《实现文档 v3》§6.2-4 修正。
+     */
+    Optional<FileEntity> findFirstByEnterpriseIdAndSha256AndDeletedAtIsNull(Long enterpriseId, String sha256);
 
     /** 指定 sha256 的存活文件数（彻底删除时判断是否还有引用，归 0 才物理删 MinIO 对象）。 */
     long countBySha256AndDeletedAtIsNull(String sha256);

@@ -1,5 +1,6 @@
 package com.company.cloud.transfer.service;
 
+import lombok.extern.slf4j.Slf4j;
 import com.company.cloud.common.audit.AuditActions;
 import com.company.cloud.common.audit.AuditEvent;
 import com.company.cloud.common.audit.AuditService;
@@ -45,6 +46,7 @@ import java.util.Set;
  * 靠「幂等重试 + 脏对象对账清理」兜底，与任务书验收「重启可续、无脏数据」一致。
  */
 @Service
+@Slf4j
 public class UploadService {
 
     public static final String STATUS_UPLOADING = "uploading";
@@ -92,14 +94,15 @@ public class UploadService {
         long targetParent = parentId == null ? 0L : parentId;
 
         // 秒传分支：sha256 命中存活 files 记录 → 零字节传输，直接复用对象
-        Optional<FileEntity> hit = fileRepo.findFirstBySha256AndDeletedAtIsNull(sha256);
+        Optional<FileEntity> hit = fileRepo.findFirstByEnterpriseIdAndSha256AndDeletedAtIsNull(currentEnterpriseId(), sha256);
         if (hit.isPresent()) {
             // 预扣配额（条件 UPDATE 防超卖）
             if (!quotaRepo.tryReserve(userId, size)) {
                 throw new BizException(ErrorCode.STORAGE_QUOTA_EXCEEDED);
             }
             FileEntity f = fileRepo.save(FileEntity.builder()
-                    .ownerId(userId).parentId(targetParent)
+                    .ownerId(userId).enterpriseId(currentEnterpriseId())
+                    .parentId(targetParent)
                     .name(resolveUniqueName(userId, targetParent, name))
                     .isDir(false).size(size).sha256(sha256).refCount(1)
                     .build());
@@ -143,6 +146,15 @@ public class UploadService {
         try {
             uploadId = minio.initMultipart(objectKeyOf(sha256));
         } catch (Exception e) {
+            // 区分「存储连不上」与「其它失败」：否则前端只看到笼统的失败，
+            // 运维也要翻日志才知道是 MinIO 挂了，而不是参数或代码问题。
+            if (isStorageUnavailable(e)) {
+                log.error("初始化上传失败：存储服务不可用 objectKey={} err={}",
+                        objectKeyOf(sha256), e.toString());
+                throw new BizException(ErrorCode.STORAGE_UNAVAILABLE,
+                        "存储服务不可用：" + e.getMessage());
+            }
+            log.error("初始化上传失败 objectKey={} err={}", objectKeyOf(sha256), e.toString());
             throw new BizException(ErrorCode.SYSTEM_ERROR, "初始化上传失败");
         }
         s.setUploadId(uploadId);
@@ -261,6 +273,7 @@ public class UploadService {
         long targetParent = s.getTargetParent() == null ? 0L : s.getTargetParent();
         FileEntity saved = fileRepo.save(FileEntity.builder()
                 .ownerId(userId)
+                .enterpriseId(currentEnterpriseId())
                 .parentId(targetParent)
                 .name(resolveUniqueName(userId, targetParent, s.getName()))
                 .isDir(false).size(s.getSizeBytes())
@@ -471,4 +484,45 @@ public class UploadService {
 
     /** 传输任务分页结果。 */
     public record UploadTaskPage(List<UploadTaskInfo> list, long total, int page, int size) { }
+    /**
+     * 判断异常是否由「存储（MinIO）不可用」引起。
+     *
+     * <p>按**类名**判断而不是 import 具体类型：既避免多包一层
+     * （{@code ExecutionException → ConnectException}）时漏判，
+     * 也顺带覆盖了 JDK 的网络异常。
+     */
+    private static boolean isStorageUnavailable(Throwable e) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            String n = t.getClass().getName();
+            if (n.startsWith("io.minio.")) {
+                return true;
+            }
+            if ("java.net.ConnectException".equals(n)
+                    || "java.net.SocketTimeoutException".equals(n)
+                    || "java.net.UnknownHostException".equals(n)
+                    || "java.net.NoRouteToHostException".equals(n)) {
+                return true;
+            }
+            if (t.getCause() == t) {
+                break;
+            }
+        }
+        return false;
+    }
+    /**
+     * 当前租户 id（写入 {@code files.enterprise_id}）。
+     *
+     * <p>上传是"写文件记录"的关键路径：这里不赋值，文件就会落成
+     * {@code enterprise_id = 0}（个人域），企业用户上传的文件变成"个人文件"，
+     * 在按企业过滤的查询里直接消失——是静默的数据错误，必须显式取。
+     */
+    private static long currentEnterpriseId() {
+        try {
+            return com.company.cloud.common.tenant.TenantContext.isPresent()
+                    ? com.company.cloud.common.tenant.TenantContext.require()
+                    : 0L;
+        } catch (Exception e) {
+            return 0L;
+        }
+    }
 }

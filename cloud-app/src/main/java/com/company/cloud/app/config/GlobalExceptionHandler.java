@@ -18,6 +18,10 @@ import org.springframework.web.method.annotation.MethodArgumentTypeMismatchExcep
 import org.springframework.web.servlet.NoHandlerFoundException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
+import java.util.Collections;
+import java.util.IdentityHashMap;
+import java.util.Set;
+
 /**
  * 全局异常处理：统一转为 {code, message, data} 返回（总纲 §5）。
  *
@@ -86,7 +90,55 @@ public class GlobalExceptionHandler {
     /** 兜底：系统错误 */
     @ExceptionHandler(Exception.class)
     public Result<Void> handleException(Exception e) {
+        // 存储（MinIO）不可用单独识别：否则"存储连不上"和"代码有 bug"都是 50000，
+        // 前端没法提示、运维要翻日志才知道是存储的问题。
+        if (isStorageUnavailable(e)) {
+            log.error("存储服务不可用: {}", rootMessage(e), e);
+            return Result.error(ErrorCode.STORAGE_UNAVAILABLE.getCode(),
+                    ErrorCode.STORAGE_UNAVAILABLE.getMessage() + "（" + rootMessage(e) + "）");
+        }
         log.error("系统异常", e);
         return Result.error(ErrorCode.SYSTEM_ERROR);
+    }
+
+    // ── 存储不可用的识别 ────────────────────────────────────────────
+    //
+    // 刻意不 import io.minio.* ：靠**类名**判断，避免 cloud-app 在编译期耦合到 minio，
+    // 也顺带覆盖了被包装多层（ExecutionException → ConnectException）的情况。
+
+    /** 明确表示"连不上/超时/无路由/域名解析不了"的 JDK 网络异常。 */
+    private static final String[] NETWORK_THROWABLES = {
+            "java.net.ConnectException",
+            "java.net.SocketTimeoutException",
+            "java.net.NoRouteToHostException",
+            "java.net.UnknownHostException",
+            "java.net.PortUnreachableException",
+    };
+
+    private boolean isStorageUnavailable(Throwable e) {
+        Set<Throwable> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (Throwable t = e; t != null && seen.add(t); t = t.getCause()) {
+            String n = t.getClass().getName();
+            if (n.startsWith("io.minio.")) {
+                return true;
+            }
+            for (String net : NETWORK_THROWABLES) {
+                if (net.equals(n)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** 取最内层异常的消息（"Failed to connect to /192.168.9.160:9000" 这类才关键）。 */
+    private String rootMessage(Throwable e) {
+        Throwable root = e;
+        Set<Throwable> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (Throwable t = e; t != null && seen.add(t); t = t.getCause()) {
+            root = t;
+        }
+        String msg = root.getMessage();
+        return msg == null || msg.isBlank() ? root.getClass().getSimpleName() : msg;
     }
 }

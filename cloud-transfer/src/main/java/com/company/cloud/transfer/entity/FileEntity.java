@@ -31,6 +31,10 @@ public class FileEntity {
     @Column(name = "owner_id", nullable = false)
     private Long ownerId;
 
+    /** 所属企业（M4）：0 = 个人域。JPA 侧必须与 DDL 严格一致（validate）。 */
+    @Column(name = "enterprise_id", nullable = false)
+    private Long enterpriseId = 0L;
+
     /** 父目录 id，0 表示根目录。 */
     @Column(name = "parent_id", nullable = false)
     private Long parentId;
