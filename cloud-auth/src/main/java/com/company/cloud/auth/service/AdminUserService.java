@@ -36,6 +36,7 @@ public class AdminUserService {
     private final PasswordEncoder passwordEncoder;
     private final AuditService auditService;
     private final RevocationService revocationService;
+    private final com.company.cloud.auth.tenant.TenantGuard tenantGuard;
 
     @Value("${app.role.default-quota-bytes}")
     private long defaultQuotaBytes;
@@ -95,6 +96,8 @@ public class AdminUserService {
     public void update(Long id, UpdateUserRequest req, Long operatorId) {
         User user = userRepository.findById(id)
                 .orElseThrow(() -> new BizException(ErrorCode.USER_NOT_FOUND));
+        // 第三道防线：跨企业按 id 操作一律按「不存在」处理（是否真拒绝由 tenant.enforce 控制）
+        tenantGuard.assertTenant(user.getEnterpriseId(), ErrorCode.USER_NOT_FOUND, "admin.user");
 
         // A3-1：禁止操作者禁用/降级自己
         boolean selfOp = operatorId != null && operatorId.equals(user.getId());
@@ -178,6 +181,8 @@ public class AdminUserService {
     public String resetPassword(Long id, String newPassword) {
         User user = userRepository.findById(id)
                 .orElseThrow(() -> new BizException(ErrorCode.USER_NOT_FOUND));
+        // 第三道防线：跨企业按 id 操作一律按「不存在」处理（是否真拒绝由 tenant.enforce 控制）
+        tenantGuard.assertTenant(user.getEnterpriseId(), ErrorCode.USER_NOT_FOUND, "admin.user");
         String raw = (newPassword == null || newPassword.isBlank()) ? randomPassword() : newPassword;
         user.setPasswordHash(passwordEncoder.encode(raw));
         user.setMustChangePassword(true);
@@ -211,6 +216,8 @@ public class AdminUserService {
     public void demote(Long id, Long operatorId) {
         User user = userRepository.findById(id)
                 .orElseThrow(() -> new BizException(ErrorCode.USER_NOT_FOUND));
+        // 第三道防线：跨企业按 id 操作一律按「不存在」处理（是否真拒绝由 tenant.enforce 控制）
+        tenantGuard.assertTenant(user.getEnterpriseId(), ErrorCode.USER_NOT_FOUND, "admin.user");
 
         // 目标非管理员：无降级必要
         if (!"admin".equals(user.getRole())) {

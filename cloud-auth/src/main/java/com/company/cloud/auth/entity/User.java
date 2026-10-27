@@ -79,6 +79,41 @@ public class User {
     @Column(name = "extra_expire_at")
     private OffsetDateTime extraExpireAt;
 
+    // ── 多租户与数据权限（V2025，M2 租户骨架）────────────────────────
+
+    /**
+     * 所属企业；{@code 0} = 个人域。
+     *
+     * <p>来源是门户 JWT 的 {@code ent} claim（企业归属的权威在门户），
+     * 产品侧只做本地投影，**不存归属真值**。
+     */
+    @Builder.Default
+    @Column(name = "enterprise_id", nullable = false)
+    private Long enterpriseId = 0L;
+
+    /** 所属部门；{@code null} = 未分配部门（挂在企业根下）。 */
+    @Column(name = "dept_id")
+    private Long deptId;
+
+    /**
+     * 数据权限档位，三档：{@code self} / {@code dept_subtree} / {@code all}。
+     *
+     * <p>⚠️ 挂在**用户**上，与角色无关（角色只决定功能权限）。
+     */
+    @Builder.Default
+    @Column(name = "data_scope", nullable = false)
+    private String dataScope = "self";
+
+    /**
+     * 企业管理员标记：{@code 1} = 企业管理员（创建者/主管理员）。
+     *
+     * <p><b>判"企业管理员"用本字段，不要用 {@code enterprise.owner_user_id}</b>——
+     * 后者只表示创建者/主管理员、转让时才改；用本字段将来可扩到多管理员。
+     */
+    @Builder.Default
+    @Column(name = "enterprise_role", nullable = false)
+    private Short enterpriseRole = 0;
+
     @Column(name = "created_at", nullable = false, insertable = false, updatable = false)
     private OffsetDateTime createdAt;
 
@@ -91,5 +126,15 @@ public class User {
 
     public boolean isDisabled() {
         return "disabled".equals(this.status);
+    }
+
+    /** 是否企业管理员（{@code enterprise_role = 1}）。 */
+    public boolean isEnterpriseAdmin() {
+        return enterpriseRole != null && enterpriseRole == 1;
+    }
+
+    /** 是否个人域账号（未加入任何企业）。 */
+    public boolean isPersonal() {
+        return enterpriseId == null || enterpriseId == 0L;
     }
 }

@@ -19,16 +19,21 @@ public interface AuditLogMapper extends BaseMapper<AuditLog> {
     /**
      * 写入一条审计日志。detail 为 JSON 文本，CAST 成 jsonb 落库——
      * MP 默认 insert 处理不了 jsonb cast，必须自定义 SQL。
+     *
+     * <p><b>V2025（M2）</b>：显式带 {@code enterprise_id}。
+     * 审计走 {@code @Async}，<b>异步线程里 TenantContext 是空的</b>，
+     * 所以企业 id 必须由<b>调用线程</b>取好后传进来（见 {@code AuditServiceImpl}）。
      */
     @Insert("""
-            INSERT INTO audit_logs(user_id, action, target, ip, detail)
-            VALUES (#{userId}, #{action}, #{target}, #{ip}, CAST(#{detail} AS jsonb))
+            INSERT INTO audit_logs(user_id, action, target, ip, detail, enterprise_id)
+            VALUES (#{userId}, #{action}, #{target}, #{ip}, CAST(#{detail} AS jsonb), #{enterpriseId})
             """)
     int insertEvent(@Param("userId") Long userId,
                     @Param("action") String action,
                     @Param("target") String target,
                     @Param("ip") String ip,
-                    @Param("detail") String detail);
+                    @Param("detail") String detail,
+                    @Param("enterpriseId") Long enterpriseId);
 
     /**
      * 按 user_id 批量取用户名（查询补 VO 的 username 用）。

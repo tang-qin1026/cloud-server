@@ -20,10 +20,17 @@ public class AuditService {
 
     private final com.company.cloud.common.audit.AuditService auditService;
 
-    public void loginSuccess(Long userId, String username, String ip) {
+    /**
+     * 登录成功审计。
+     *
+     * <p><b>V2025（M2）</b>：必须显式传 {@code enterpriseId}。
+     * 登录发生在<b>建立租户上下文之前</b>（请求压根没有 Bearer token），
+     * 所以 {@code AuditServiceImpl} 取不到 ThreadLocal —— 只有调用方知道"这个人属于哪家企业"。
+     */
+    public void loginSuccess(Long userId, String username, String ip, Long enterpriseId) {
         auditService.record(new AuditEvent(
                 userId, AuditActions.LOGIN, username, ip,
-                Map.of("username", username, "success", true)));
+                Map.of("username", username, "success", true), enterpriseId));
     }
 
     public void loginFail(String username, String ip) {

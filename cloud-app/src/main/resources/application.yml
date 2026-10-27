@@ -1,3 +1,10 @@
+# ---- 多租户隔离（M2 租户骨架）----
+tenant:
+  # 灰度开关：false = 第三道防线只记日志不拒绝；true = 跨企业访问直接拒绝
+  # 建议先 false 观察一周，日志里"本该拒绝"应为 0 再转 true
+  enforce: ${TENANT_ENFORCE:false}
+  # 迁移/脚本期间可整体关闭租户过滤（危险，仅限运维）
+  filter-enabled: ${TENANT_FILTER_ENABLED:true}
 # 私有云存储平台 · 应用配置
 # 端口：3001 / 3002 双实例（不对外，Nginx :8080 反代）。部署时 --server.port 覆盖。
 server:

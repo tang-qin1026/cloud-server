@@ -160,7 +160,7 @@ public class AuthService {
         String access = jwtService.createAccessToken(user.getId(), user.getUsername(), user.getRole());
         String refresh = jwtService.createRefreshToken(user.getId(), user.getUsername(), user.getRole());
 
-        auditService.loginSuccess(user.getId(), user.getUsername(), ip);
+        auditService.loginSuccess(user.getId(), user.getUsername(), ip, user.getEnterpriseId());
         return new LoginResponse(access, refresh, userMap(user));
     }
 
