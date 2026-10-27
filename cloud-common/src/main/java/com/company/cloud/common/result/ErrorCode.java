@@ -24,6 +24,10 @@ public enum ErrorCode {
     TOKEN_INVALID(40103, "登录已过期，请重新登录"),
     FORBIDDEN(40301, "无权限访问"),
     MUST_CHANGE_PASSWORD(40302, "请先修改初始密码"),
+    /** 未知路由/接口不存在（HTTP 404）。用于区分"没这个接口"与"服务故障" */
+    API_NOT_FOUND(40400, "接口不存在"),
+    /** HTTP 方法不支持（HTTP 405） */
+    METHOD_NOT_ALLOWED(40500, "请求方法不支持"),
     USER_NOT_FOUND(40401, "用户不存在"),
     QUOTA_TOO_LOW(42101, "配额不能低于当前已用量"),
     ACCOUNT_LOCKED(42301, "失败次数过多，账号已临时锁定"),

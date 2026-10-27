@@ -131,6 +131,37 @@
         DELETE FROM files WHERE id IN (SELECT id FROM sub)
     </delete>
 
+    <!--
+      子树文件清单（**不区分回收站**）：供 DELETE /files/{id}?force=1 删除活文件使用。
+      与上面的差异只有一处：CTE 不再要求 deleted_at IS NOT NULL。
+    -->
+    <select id="selectSubtreeFilesAny" resultType="com.company.cloud.files.recycle.dto.SubtreeFile">
+        WITH RECURSIVE sub AS (
+            SELECT id FROM files
+            WHERE id = #{id}
+              AND owner_id = #{userId}
+            UNION ALL
+            SELECT f.id FROM files f
+            JOIN sub s ON f.parent_id = s.id
+        )
+        SELECT id, sha256, size FROM files
+        WHERE id IN (SELECT id FROM sub)
+          AND is_dir = false
+    </select>
+
+    <!-- 级联物理删除（**不区分回收站**）：活文件及其全部子孙直接 DELETE -->
+    <delete id="deleteCascadePhysicalAny">
+        WITH RECURSIVE sub AS (
+            SELECT id FROM files
+            WHERE id = #{id}
+              AND owner_id = #{userId}
+            UNION ALL
+            SELECT f.id FROM files f
+            JOIN sub s ON f.parent_id = s.id
+        )
+        DELETE FROM files WHERE id IN (SELECT id FROM sub)
+    </delete>
+
     <!-- 释放配额（R-C06）：users 表 Owner 是 A 组，释放配额是 C 组彻底删除职责，直接 SQL -->
     <update id="releaseQuota">
         UPDATE users

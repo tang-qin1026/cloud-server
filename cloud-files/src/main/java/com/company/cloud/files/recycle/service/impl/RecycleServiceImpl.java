@@ -85,13 +85,27 @@ public class RecycleServiceImpl implements RecycleService {
     @Override
     @Transactional
     public void forceDelete(Long userId, Long id) {
-        FileNode node = requireRecycleNode(userId, id);
+        // 彻底删除对「回收站里的项」和「还没删的活文件」都成立（前者来自回收站页，
+        // 后者来自 DELETE /files/{id}?force=1）。只有"不是我的"才算不存在。
+        FileNode node = mapper.selectById(id);
+        if (node == null || !userId.equals(node.getOwnerId())) {
+            throw new BizException(ErrorCode.FILE_NOT_FOUND);
+        }
+        boolean wasInRecycle = node.getDeletedAt() != null;
 
-        // 先收集子树文件清单（配额 + 引用计数用），再级联物理删除
-        List<SubtreeFile> files = mapper.selectSubtreeFiles(userId, id);
+        // 先收集子树文件清单（配额 + 引用计数用），再级联物理删除。
+        // 两条 SQL 必须与"节点是否在回收站"匹配：回收站版 CTE 带 deleted_at IS NOT NULL，
+        // 对活文件会返回 0 行 → 配额不释放、引用计数不减。
+        List<SubtreeFile> files = wasInRecycle
+                ? mapper.selectSubtreeFiles(userId, id)
+                : mapper.selectSubtreeFilesAny(userId, id);
         long bytes = files.stream().mapToLong(f -> f.getSize() == null ? 0L : f.getSize()).sum();
 
-        mapper.deleteCascadePhysical(userId, id);
+        if (wasInRecycle) {
+            mapper.deleteCascadePhysical(userId, id);
+        } else {
+            mapper.deleteCascadePhysicalAny(userId, id);
+        }
         if (bytes > 0) {
             mapper.releaseQuota(userId, bytes);
         }
@@ -102,7 +116,7 @@ public class RecycleServiceImpl implements RecycleService {
 
         auditService.record(new AuditEvent(
                 userId, AuditActions.DELETE_FORCE, String.valueOf(id), null,
-                Map.of("name", node.getName(), "size", bytes)));
+                Map.of("name", node.getName(), "size", bytes, "fromRecycle", wasInRecycle)));
     }
 
     // ---------- 内部工具 ----------

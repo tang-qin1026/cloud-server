@@ -1,5 +1,7 @@
 package com.company.cloud.auth.entity;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.persistence.*;
 import lombok.*;
 
@@ -37,6 +39,13 @@ public class User {
     @Column(nullable = false, unique = true)
     private String username;
 
+    /**
+     * 密码哈希。
+     *
+     * <p>⚠️ {@code @JsonIgnore} **必须保留**：本实体被 {@code /api/admin/users} 直接当作
+     * 响应体返回，少了它就会把哈希泄露给前端。
+     */
+    @JsonIgnore
     @Column(name = "password_hash", nullable = false)
     private String passwordHash;
 
@@ -100,7 +109,13 @@ public class User {
      *
      * <p>⚠️ 挂在**用户**上，与角色无关（角色只决定功能权限）。
      */
+    /**
+     * 数据权限档位（DB 存小写，与 CHECK 约束一致）：{@code self} / {@code dept_subtree} / {@code all}。
+     *
+     * <p>对外 JSON 由 {@link #getDataScope()} 转成设计方案里的档位名，见下。
+     */
     @Builder.Default
+    @Getter(AccessLevel.NONE)
     @Column(name = "data_scope", nullable = false)
     private String dataScope = "self";
 
@@ -120,21 +135,55 @@ public class User {
     @Column(name = "updated_at", nullable = false, insertable = false, updatable = false)
     private OffsetDateTime updatedAt;
 
+    /** 仅服务端使用，不参与 JSON 序列化（避免暴露内部判断语义）。 */
+    @JsonIgnore
     public boolean isAdmin() {
         return "admin".equals(this.role);
     }
 
+    /** 仅服务端使用，不参与 JSON 序列化（避免暴露内部判断语义）。 */
+    @JsonIgnore
     public boolean isDisabled() {
         return "disabled".equals(this.status);
     }
 
     /** 是否企业管理员（{@code enterprise_role = 1}）。 */
+    /** 仅服务端使用，不参与 JSON 序列化（避免暴露内部判断语义）。 */
+    @JsonIgnore
     public boolean isEnterpriseAdmin() {
         return enterpriseRole != null && enterpriseRole == 1;
     }
 
     /** 是否个人域账号（未加入任何企业）。 */
+    /** 仅服务端使用，不参与 JSON 序列化（避免暴露内部判断语义）。 */
+    @JsonIgnore
     public boolean isPersonal() {
         return enterpriseId == null || enterpriseId == 0L;
+    }
+
+    /**
+     * 数据权限档位，**对外返回设计方案的档位名**（小写入库、大写出参）。
+     *
+     * <p>映射：{@code self→SELF}、{@code dept_subtree→DEPT_AND_BELOW}、{@code all→ALL}。
+     * 为什么不在库里直接存大写：CHECK 约束已按小写建立（V2025），
+     * 改库需要额外迁移；而前端契约只关心出参，因此在校验层保持小写、在序列化层转换。
+     */
+    @JsonProperty("dataScope")
+    public String getDataScope() {
+        if (dataScope == null) {
+            return null;
+        }
+        return switch (dataScope) {
+            case "self" -> "SELF";
+            case "dept_subtree" -> "DEPT_AND_BELOW";
+            case "all" -> "ALL";
+            default -> dataScope.toUpperCase(java.util.Locale.ROOT);
+        };
+    }
+
+    /** 内部使用的原始值（小写，与数据库 CHECK 一致）。 */
+    @JsonIgnore
+    public String getDataScopeRaw() {
+        return dataScope;
     }
 }

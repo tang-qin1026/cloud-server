@@ -82,6 +82,20 @@ public interface FileNodeMapper extends BaseMapper<FileNode> {
     int deleteCascadePhysical(@Param("userId") Long userId, @Param("id") Long id);
 
     /**
+     * 子树文件清单（**不区分是否在回收站**）。
+     *
+     * <p>用于 {@code DELETE /files/{id}?force=1} 对**未删除的活文件**做彻底删除：
+     * {@link #selectSubtreeFiles} 的 CTE 硬编码了 {@code deleted_at IS NOT NULL}，
+     * 对活文件会返回 0 行 → 配额不释放、引用计数不减。所以单独开一条。
+     */
+    List<SubtreeFile> selectSubtreeFilesAny(@Param("userId") Long userId, @Param("id") Long id);
+
+    /**
+     * 级联物理删除（**不区分是否在回收站**）：活文件及其全部子孙直接 DELETE。
+     */
+    int deleteCascadePhysicalAny(@Param("userId") Long userId, @Param("id") Long id);
+
+    /**
      * 释放用户配额（users 表 Owner 是 A 组，但释放配额是 C 组彻底删除的职责，
      * 直接 SQL；GREATEST 兜底防负值）。
      */
