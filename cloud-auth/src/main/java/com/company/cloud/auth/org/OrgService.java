@@ -149,20 +149,44 @@ public class OrgService {
     public Map<String, Object> deptTree(String status) {
         Long entId = tenantIdForRead();
         List<Map<String, Object>> rows = orgMapper.selectDepts(entId, status);
-        List<Map<String, Object>> out = new ArrayList<>(rows.size());
-        for (Map<String, Object> d : rows) {
-            Map<String, Object> m = new LinkedHashMap<>();
-            m.put("id", d.get("id"));
-            m.put("parentId", d.get("parent_id"));
-            m.put("name", d.get("name"));
-            m.put("path", d.get("path"));
-            m.put("status", d.get("status"));
-            m.put("sortNo", d.get("sort_no"));
-            out.add(m);
-        }
-        return Map.of("total", out.size(), "list", out);
-    }
 
+        // 先转成可变节点（LinkedHashMap，要往里塞 children），保证顺序与 SQL 的 path/sort 一致
+        Map<Long, Map<String, Object>> byId = new LinkedHashMap<>();
+        List<Map<String, Object>> flat = new ArrayList<>(rows.size());
+        for (Map<String, Object> d : rows) {
+            Map<String, Object> node = new LinkedHashMap<>();
+            Object idObj = d.get("id");
+            long id = idObj instanceof Number n ? n.longValue() : 0L;
+            Object pidObj = d.get("parent_id");
+            Long parentId = pidObj instanceof Number pn ? pn.longValue() : null;
+            node.put("id", idObj);
+            node.put("parentId", parentId);
+            node.put("name", d.get("name"));
+            node.put("path", d.get("path"));
+            node.put("status", d.get("status"));
+            node.put("sortNo", d.get("sort_no"));
+            node.put("children", new ArrayList<Map<String, Object>>());
+            byId.put(id, node);
+            flat.add(node);
+        }
+
+        // 挂父子：parent 不在结果集里（被 status 过滤掉）的按根处理，避免出现"孤儿"不可见
+        List<Map<String, Object>> tree = new ArrayList<>();
+        for (Map<String, Object> node : byId.values()) {
+            Object pidObj = node.get("parentId");
+            Long pid = pidObj instanceof Number n ? n.longValue() : null;
+            Map<String, Object> parent = (pid == null || pid == 0L) ? null : byId.get(pid);
+            if (parent == null) {
+                tree.add(node);
+            } else {
+                @SuppressWarnings("unchecked")
+                List<Map<String, Object>> children = (List<Map<String, Object>>) parent.get("children");
+                children.add(node);
+            }
+        }
+        // tree = 嵌套（前端树组件直接用）；list = 扁平（保留兼容，字段与之前一致）
+        return Map.of("total", flat.size(), "tree", tree, "list", flat);
+    }
     // ── 成员列表 ───────────────────────────────────────────────
 
     /** {@code GET /users}：成员列表（分页）。 */
