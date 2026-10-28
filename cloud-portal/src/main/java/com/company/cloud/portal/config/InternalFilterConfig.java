@@ -7,7 +7,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.core.Ordered;
 
 /**
- * 把 {@link InternalKeyFilter} 注册为仅作用于 {@code /internal/*} 的 Servlet Filter。
+ * 把 {@link InternalServiceAuthFilter} 注册为仅作用于 {@code /internal/*} 的 Servlet Filter。
  *
  * <p>注册方式说明：SecurityConfig 在 cloud-auth 中，cloud-portal 依赖它，
  * 反向依赖会造成模块循环。因此内网接口的密钥校验走独立的 FilterRegistrationBean，
@@ -34,7 +34,7 @@ public class InternalFilterConfig {
                 new FilterRegistrationBean<>(new InternalServiceAuthFilter(
                         props, svcProps, verifier, jwksClient, redis));
         bean.addUrlPatterns("/internal/*");
-        bean.setName("portalInternalKeyFilter");
+        bean.setName("portalServiceAuthFilter");
         bean.setOrder(Ordered.HIGHEST_PRECEDENCE + 10);
         return bean;
     }

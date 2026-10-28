@@ -15,7 +15,7 @@ import org.springframework.context.annotation.Configuration;
  *   <li>声明文档基本信息；</li>
  *   <li>注册两个安全方案，Swagger UI 右上角因此会出现 <b>Authorize</b> 按钮：
  *       <ul>
- *         <li>{@code internalKey} —— 请求头 {@code X-Internal-Key}，用于 {@code /internal/**}</li>
+ *         <li>{@code serviceAuth} —— {@code Authorization: Bearer <服务凭据JWT>}，用于 {@code /internal/**}（《27》）</li>
  *         <li>{@code bearerAuth} —— {@code Authorization: Bearer <JWT>}，用于管理端接口</li>
  *       </ul>
  *   </li>
@@ -32,8 +32,13 @@ import org.springframework.context.annotation.Configuration;
 @Configuration
 public class OpenApiConfig {
 
-    /** 安全方案名：门户内部调用密钥（请求头 X-Internal-Key）。 */
-    public static final String SEC_INTERNAL_KEY = "internalKey";
+    /**
+     * 安全方案名：服务凭据（{@code Authorization: Bearer <JWT>}），用于 {@code /internal/**}。
+     *
+     * <p>《27》改造后内网接口改用 RS256 服务凭据；旧的 {@code X-Internal-Key}
+     * 仅在双通道模式（{@code app.service-auth.inbound-strict=false}）下作为回退。
+     */
+    public static final String SEC_INTERNAL_KEY = "serviceAuth";
 
     /** 安全方案名：Bearer JWT（本系统 HS256 或门户 RS256 均可）。 */
     public static final String SEC_BEARER = "bearerAuth";
@@ -47,11 +52,11 @@ public class OpenApiConfig {
 
                 | 分组 | 路径 | 鉴权 | 调用方 |
                 |---|---|---|---|
-                | 门户内网接口 | `/api/internal/**` | 请求头 `X-Internal-Key` | 门户主动调用 |
+                | 门户内网接口 | `/api/internal/**` | `Authorization: Bearer <服务凭据>` | 门户主动调用 |
                 | 门户运维接口 | `/api/admin/portal/**` | Bearer JWT + admin 角色 | 运维/联调手工触发 |
 
                 ### 测试前必做：点右上角 Authorize
-                1. **internalKey**：填平台侧下发的密钥（对应 `app.portal.internal-key`）。
+                1. **serviceAuth**：填门户签发的服务凭据（RS256 JWT）。旧的双通道回退方式是在请求头加 `X-Internal-Key`（对应 `app.portal.internal-key`），仅在 `inbound-strict=false` 时有效。
                    未配置时后端会 fail-closed，一律返回 `HTTP 401 {"code":40001}`。
                 2. **bearerAuth**：填 `admin / Admin@123` 调 `/api/auth/login` 拿到的 `accessToken`
                    （**只填 token 本身，不要带 "Bearer " 前缀**；注意 accessToken 在响应 `data.accessToken`，不是 `data.token`）。

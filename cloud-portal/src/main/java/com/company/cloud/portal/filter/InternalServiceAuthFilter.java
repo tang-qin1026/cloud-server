@@ -66,8 +66,10 @@ public class InternalServiceAuthFilter extends OncePerRequestFilter {
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
                                     FilterChain chain) throws ServletException, IOException {
-        // 服务凭据未启用 → 回退旧密钥（行为与改造前一致）
-        if (!svcProps.isConfigured()) {
+        // 入站未启用 → 回退旧密钥（行为与改造前一致）。
+        // 注意这里用 isInboundReady() 而不是 isConfigured()：
+        // 入站只需门户 JWKS，不该被"我们自己的私钥"卡住。
+        if (!svcProps.isInboundReady()) {
             if (!checkInternalKey(request)) {
                 reject(response);
                 return;
@@ -81,7 +83,20 @@ public class InternalServiceAuthFilter extends OncePerRequestFilter {
         HttpServletRequest replayable = new ReplayableRequest(request, rawBody);
 
         String header = request.getHeader("Authorization");
-        if (header == null || !header.startsWith("Bearer ")) {
+        boolean hasBearer = header != null && header.startsWith("Bearer ");
+
+        // 双通道：没有 Bearer 头时回退旧密钥（门户可先上 Bearer、后停旧密钥）
+        if (!hasBearer && svcProps.isInboundDualMode()) {
+            if (checkInternalKey(request)) {
+                log.debug("[svc-auth] 双通道：以 X-Internal-Key 通过 uri={}", request.getRequestURI());
+                chain.doFilter(replayable, response);
+                return;
+            }
+            log.warn("[svc-auth] 双通道：无 Bearer 且密钥不对 uri={}", request.getRequestURI());
+            reject(response);
+            return;
+        }
+        if (!hasBearer) {
             log.warn("[svc-auth] 缺少 Authorization Bearer uri={}", request.getRequestURI());
             reject(response);
             return;

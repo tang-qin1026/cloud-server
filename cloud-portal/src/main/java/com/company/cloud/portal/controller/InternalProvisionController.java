@@ -26,7 +26,7 @@ import org.springframework.web.bind.annotation.RestController;
  *
  * <pre>POST /api/internal/provision</pre>
  *
- * <p>鉴权：{@code X-Internal-Key}（由 InternalKeyFilter 完成）。
+ * <p>鉴权：RS256 服务凭据（{@code Authorization: Bearer}，由 InternalServiceAuthFilter 完成）。
  *
  * <p><b>HTTP 状态码一律 200</b>：失败用 body 里的 {@code code} 表达
  * （4003 sku 不存在 / 4004 库存不足 / 5001 内部错误）。

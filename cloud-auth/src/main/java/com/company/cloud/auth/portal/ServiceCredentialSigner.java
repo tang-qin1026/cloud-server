@@ -59,7 +59,7 @@ public class ServiceCredentialSigner {
 
     /** 私钥是否可用。 */
     public boolean isReady() {
-        return privateKey != null && props.isConfigured();
+        return privateKey != null && props.isOutboundReady();
     }
 
     /**

@@ -22,7 +22,7 @@ import org.springframework.web.bind.annotation.RestController;
  *
  * <pre>GET /api/internal/products</pre>
  *
- * <p>鉴权：{@code X-Internal-Key}（由 InternalKeyFilter 在 Security 链之前完成）。
+ * <p>鉴权：RS256 服务凭据（{@code Authorization: Bearer}，由 InternalServiceAuthFilter 在 Security 链之前完成）。
  * 响应套 {@code {code, data}} 外壳，与门户响应结构一致。
  *
  * <p>门户每 10 分钟拉取一次并全量 upsert 到 {@code cloud_portal.p_product}；

@@ -38,11 +38,49 @@ public class ServiceAuthProperties {
     /** 服务凭据有效期（秒）。文档定 60 秒。 */
     private long ttlSeconds = 60;
 
-    /** 是否启用服务凭据（关闭时回退到旧的 X-Internal-Key，便于灰度/回滚）。 */
+    /** 总开关。关闭时两个方向都回退到旧的 X-Internal-Key。 */
     private boolean enabled = true;
 
-    public boolean isConfigured() {
-        return enabled && privateKeyFile != null && !privateKeyFile.isBlank()
+    /**
+     * **入站**开关：我们是否要求门户带 Bearer 来调用 /internal/**。
+     *
+     * <p>注意：入站验签只用**门户的公钥**（从 JWKS 拉），**不需要我们的私钥**。
+     * 所以它与 {@code privateKeyFile} 无关 —— 这是刻意拆开的。
+     */
+    private boolean inboundEnabled = false;
+
+    /**
+     * **出站**开关：我们调门户时是否签服务凭据。需要我们的私钥。
+     */
+    private boolean outboundEnabled = false;
+
+    /**
+     * 入站**严格模式**：true 时只认 Bearer，带 X-Internal-Key 的请求一律拒绝。
+     *
+     * <p>默认 false = **双通道**：先试 Bearer，没有 Bearer 头时回退缩 X-Internal-Key。
+     * 这样门户可以先上 Bearer、后停旧密钥，无需与产品侧同时切换。
+     */
+    private boolean inboundStrict = false;
+
+    /** 入站是否就绪（只需总开关 + inboundEnabled）。 */
+    public boolean isInboundReady() {
+        return enabled && inboundEnabled;
+    }
+
+    /** 入站是否双通道（启用入站但未严格）。 */
+    public boolean isInboundDualMode() {
+        return isInboundReady() && !inboundStrict;
+    }
+
+    /** 出站是否就绪（需总开关 + outboundEnabled + 私钥与 kid）。 */
+    public boolean isOutboundReady() {
+        return enabled && outboundEnabled
+                && privateKeyFile != null && !privateKeyFile.isBlank()
                 && keyId != null && !keyId.isBlank();
+    }
+
+    /** 兼容旧调用：语义等同"出站就绪"。 */
+    public boolean isConfigured() {
+        return isOutboundReady();
     }
 }
