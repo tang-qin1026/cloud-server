@@ -61,7 +61,9 @@ public class PortalJwtAuthFilter extends OncePerRequestFilter {
         try {
             PortalJwtVerifier.PortalToken token =
                     verifier.verify(header.substring(BEARER.length()));
-            CurrentUser currentUser = shadowUserService.resolveOrCreate(token.portalUserId(), token.username());
+            CurrentUser currentUser = shadowUserService.resolveOrCreate(
+                    token.portalUserId(), token.username(),
+                    token.userType(), token.enterpriseId(), token.enterpriseRole());
             UsernamePasswordAuthenticationToken auth = new UsernamePasswordAuthenticationToken(
                     currentUser, null,
                     List.of(new SimpleGrantedAuthority("ROLE_" + currentUser.getRole())));

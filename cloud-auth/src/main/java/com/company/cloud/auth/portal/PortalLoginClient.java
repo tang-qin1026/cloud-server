@@ -109,7 +109,24 @@ public class PortalLoginClient {
                             "门户登录成功但未返回 data.user.id");
                 }
                 log.debug("[portal] 登录回落门户校验通过 portalUserId={}", id);
-                return new PortalLoginUser(id, user.path("username").asText(username));
+                // 租户三件套（v2）：门户已在登录响应里返回，这里必须取，否则影子用户永远无企业归属。
+                // enterprise_id 在门户 JSON 里是**字符串**，需转 Long。
+                Integer userType = user.path("user_type").isNumber() ? user.get("user_type").asInt() : null;
+                Integer enterpriseRole = user.path("enterprise_role").isNumber() ? user.get("enterprise_role").asInt() : null;
+                Long enterpriseId = null;
+                JsonNode entNode = user.get("enterprise_id");
+                if (entNode != null && !entNode.isNull()) {
+                    String entText = entNode.asText("").trim();
+                    if (!entText.isEmpty()) {
+                        try {
+                            enterpriseId = Long.valueOf(entText);
+                        } catch (NumberFormatException e) {
+                            log.warn("[portal] enterprise_id 非数字，忽略 enterprise_id={}", entText);
+                        }
+                    }
+                }
+                return new PortalLoginUser(id, user.path("username").asText(username),
+                        userType, enterpriseId, enterpriseRole);
 
             case CODE_BAD_CREDENTIALS:
                 // 门户不区分"用户不存在"与"密码错"，我们也不猜，原样透传

@@ -77,4 +77,42 @@ public class PortalShadowUserService {
     public CurrentUser resolveForProvision(String portalUserId) {
         return resolveOrCreate(portalUserId, null);
     }
+    /**
+     * 门户令牌带租户信息时的解析：除影子用户外，还把 {@code ut / ent / er}
+     * **投影**到本地 {@code users}（企业归属的权威在门户，产品侧只做投影）。
+     *
+     * <p>只在值发生变化时写库，避免每个请求都 UPDATE。
+     */
+    @jakarta.transaction.Transactional
+    public CurrentUser resolveOrCreate(String portalUserId, String uname,
+                                       Integer userType, Long enterpriseId, Integer enterpriseRole) {
+        CurrentUser base = resolveOrCreate(portalUserId, uname);
+        if (enterpriseId == null && enterpriseRole == null) {
+            return base;
+        }
+        User user = userRepository.findById(base.getId()).orElse(null);
+        if (user == null) {
+            return base;
+        }
+        boolean changed = false;
+        if (enterpriseId != null && !enterpriseId.equals(user.getEnterpriseId())) {
+            user.setEnterpriseId(enterpriseId);
+            changed = true;
+        }
+        if (enterpriseRole != null
+                && !java.util.Objects.equals(enterpriseRole.shortValue(), user.getEnterpriseRole())) {
+            user.setEnterpriseRole(enterpriseRole.shortValue());
+            changed = true;
+        }
+        if (changed) {
+            userRepository.save(user);
+            log.info("[portal] 投影租户信息 userId={} enterpriseId={} enterpriseRole={}",
+                    user.getId(), user.getEnterpriseId(), user.getEnterpriseRole());
+        }
+        return new CurrentUser(
+                user.getId(), user.getUsername(), user.getRole(),
+                userType == null ? 0 : userType,
+                user.getEnterpriseId(),
+                user.getEnterpriseRole() == null ? 0 : user.getEnterpriseRole().intValue());
+    }
 }

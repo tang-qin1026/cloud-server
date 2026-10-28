@@ -203,7 +203,9 @@ public class AuthService {
         }
         // 按门户 UUID 查/建影子用户。
         // 切忌按用户名查：门户有个 luobo，本地可能也有个同名的另一个人，会串号。
-        CurrentUser shadow = shadowUserService.resolveOrCreate(portalUser.portalUserId(), portalUser.username());
+        CurrentUser shadow = shadowUserService.resolveOrCreate(
+                portalUser.portalUserId(), portalUser.username(),
+                portalUser.userType(), portalUser.enterpriseId(), portalUser.enterpriseRole());
         return userRepository.findById(shadow.getId())
                 .orElseThrow(() -> new BizException(ErrorCode.SYSTEM_ERROR));
     }

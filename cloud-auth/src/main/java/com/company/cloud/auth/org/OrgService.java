@@ -541,4 +541,168 @@ public class OrgService {
         }
         return ids;
     }
+    // ── 部门 CRUD（物化路径维护是重点）───────────────────────────
+
+    /**
+     * 新建部门。{@code path = 父.path + 自己id + '/'}，根的 path 为 {@code /id/}。
+     */
+    @Transactional
+    public Map<String, Object> createDept(CurrentUser cu, String name, Long parentId, Integer sortNo) {
+        long entId = requireEnterpriseContext();
+        requirePerm(cu, "org.dept.manage");
+        String deptName = requireName(name);
+        long pid = parentId == null ? 0L : parentId;
+
+        String parentPath = "/";
+        if (pid > 0) {
+            Map<String, Object> parent = orgWriteMapper.selectDeptInEnterprise(pid, entId);
+            if (parent == null) {
+                throw new BizException(ErrorCode.BAD_REQUEST, "父部门不属于本企业：" + pid);
+            }
+            parentPath = str(parent.get("path"));
+        }
+        if (orgWriteMapper.countSiblingName(entId, pid, deptName, 0L) > 0) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "同层已存在同名部门：" + deptName);
+        }
+
+        // 先插入占位 path，拿到自增 id 后再回填（path 含自身 id）
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("entId", entId);
+        row.put("parentId", pid == 0 ? null : pid);
+        row.put("name", deptName);
+        row.put("tmpPath", "/tmp/");
+        row.put("sortNo", sortNo == null ? 0 : sortNo);
+        orgWriteMapper.insertDept(row);
+        Object newId = row.get("id");
+        if (!(newId instanceof Number n)) {
+            throw new BizException(ErrorCode.SYSTEM_ERROR, "部门创建后未取得 id");
+        }
+        long selfId = n.longValue();
+        String path = (parentPath.endsWith("/") ? parentPath : parentPath + "/") + selfId + "/";
+        orgWriteMapper.updateDeptPath(selfId, entId, path);
+
+        return Map.of("id", selfId, "path", path);
+    }
+
+    /**
+     * 修改部门（改名 / 移动父级 / 排序）。
+     *
+     * <p><b>移动时必须级联改写子孙 path</b>：否则子树的 path 仍指向旧父级，
+     * 数据范围 {@code dept_subtree} 用 LIKE 前缀匹配会漏掉整个子树 —— 这是静默的越权/漏权。
+     */
+    @Transactional
+    public void updateDept(CurrentUser cu, long deptId, String name, Long parentId, Integer sortNo) {
+        long entId = requireEnterpriseContext();
+        requirePerm(cu, "org.dept.manage");
+
+        Map<String, Object> self = orgWriteMapper.selectDeptInEnterprise(deptId, entId);
+        if (self == null) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "部门不属于本企业：" + deptId);
+        }
+        String oldPath = str(self.get("path"));
+        long oldParent = self.get("parent_id") == null ? 0L : ((Number) self.get("parent_id")).longValue();
+        String deptName = (name == null || name.isBlank()) ? str(self.get("name")) : requireName(name);
+        long newParent = parentId == null ? oldParent : parentId;
+
+        // 不能挂到自己或自己的子孙下（否则 path 会成环）
+        if (newParent == deptId || newParent > 0) {
+            Map<String, Object> np = newParent == 0 ? null : orgWriteMapper.selectDeptInEnterprise(newParent, entId);
+            if (newParent > 0 && np == null) {
+                throw new BizException(ErrorCode.BAD_REQUEST, "父部门不属于本企业：" + newParent);
+            }
+            if (np != null && str(np.get("path")).startsWith(oldPath)) {
+                throw new BizException(ErrorCode.BAD_REQUEST, "不能把部门移动到自己的子部门下");
+            }
+        }
+        if (orgWriteMapper.countSiblingName(entId, newParent, deptName, deptId) > 0) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "同层已存在同名部门：" + deptName);
+        }
+
+        orgWriteMapper.updateDept(deptId, entId, deptName, newParent == 0 ? null : newParent,
+                sortNo == null ? 0 : sortNo);
+
+        if (newParent != oldParent) {
+            String parentPath = "/";
+            if (newParent > 0) {
+                parentPath = str(orgWriteMapper.selectDeptInEnterprise(newParent, entId).get("path"));
+            }
+            String newPath = (parentPath.endsWith("/") ? parentPath : parentPath + "/") + deptId + "/";
+            orgWriteMapper.updateDeptPath(deptId, entId, newPath);
+            // 级联：子孙 path 里把 oldPath 前缀换成 newPath
+            orgWriteMapper.rewriteDescendantPaths(entId, oldPath, newPath, deptId);
+        }
+    }
+
+    /** 删除部门：必须无子部门、无成员，否则先迁走。 */
+    @Transactional
+    public void deleteDept(CurrentUser cu, long deptId) {
+        long entId = requireEnterpriseContext();
+        requirePerm(cu, "org.dept.manage");
+        if (orgWriteMapper.selectDeptInEnterprise(deptId, entId) == null) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "部门不属于本企业：" + deptId);
+        }
+        int child = orgWriteMapper.countChildDepts(entId, deptId);
+        if (child > 0) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "存在 " + child + " 个子部门，请先删除或移走");
+        }
+        int members = orgWriteMapper.countMembersInDept(entId, deptId);
+        if (members > 0) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "部门下还有 " + members + " 名成员，请先调整其部门");
+        }
+        orgWriteMapper.deleteDept(deptId, entId);
+    }
+
+    // ── 角色权限点分配 ─────────────────────────────────────────
+
+    /** 查某角色的权限点。 */
+    public Map<String, Object> rolePermissions(CurrentUser cu, long roleId) {
+        long entId = requireEnterpriseContext();
+        requireAnyPerm(cu, "role.read", "role.manage", "org.member.read");
+        if (orgWriteMapper.countRoleInEnterprise(roleId, entId) == 0) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "角色不属于本企业：" + roleId);
+        }
+        List<String> codes = orgWriteMapper.selectRolePermCodes(roleId);
+        return Map.of("roleId", roleId, "total", codes.size(), "codes", codes);
+    }
+
+    /**
+     * 整体覆盖角色的权限点。
+     *
+     * <p><b>硬约束</b>：企业角色**不能**被授予平台级权限点（发布版本 / 改系统配置 / 密钥管理），
+     * 否则任一企业的管理员都能影响全平台。
+     */
+    @Transactional
+    public void setRolePermissions(CurrentUser cu, long roleId, List<String> codes) {
+        long entId = requireEnterpriseContext();
+        requirePerm(cu, "role.manage");
+        if (orgWriteMapper.countRoleInEnterprise(roleId, entId) == 0) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "角色不属于本企业：" + roleId);
+        }
+        List<String> want = codes == null ? List.of() : codes.stream()
+                .filter(c -> c != null && !c.isBlank()).distinct().toList();
+
+        if (!want.isEmpty()) {
+            List<String> bad = orgWriteMapper.selectPlatformOnlyAmong(want);
+            if (!bad.isEmpty()) {
+                throw new BizException(ErrorCode.BAD_REQUEST,
+                        "企业角色不能授予平台级权限点：" + String.join(",", bad));
+            }
+        }
+        orgWriteMapper.clearRolePerms(roleId);
+        if (!want.isEmpty()) {
+            orgWriteMapper.addRolePerms(roleId, want);
+        }
+    }
+
+    /** 部门名非空且不超长。 */
+    private static String requireName(String name) {
+        if (name == null || name.isBlank()) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "部门名称不能为空");
+        }
+        String n = name.trim();
+        if (n.length() > 64) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "部门名称不能超过 64 字");
+        }
+        return n;
+    }
 }

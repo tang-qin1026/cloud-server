@@ -104,4 +104,107 @@ public interface OrgWriteMapper {
     /** 企业主管理员（资源收回的目标：资源归人不归企业，收回回到主管理员名下）。 */
     @Select("SELECT owner_user_id FROM enterprise WHERE id = #{entId}")
     Long selectEnterpriseOwner(@Param("entId") long entId);
+    // ── 部门 CRUD（物化路径 /id/）────────────────────────────────
+
+    /** 取部门（含 path），用于算新路径与校验归属。 */
+    @Select("""
+            SELECT id, parent_id, name, path FROM dept
+            WHERE id = #{id} AND enterprise_id = #{entId}
+            """)
+    Map<String, Object> selectDeptInEnterprise(@Param("id") long id, @Param("entId") long entId);
+
+    /** 子部门数量。 */
+    @Select("SELECT COUNT(*) FROM dept WHERE enterprise_id = #{entId} AND parent_id = #{parentId}")
+    int countChildDepts(@Param("entId") long entId, @Param("parentId") long parentId);
+
+    /** 挂在某部门下的成员数量（删除前检查）。 */
+    @Select("SELECT COUNT(*) FROM users WHERE enterprise_id = #{entId} AND dept_id = #{deptId}")
+    int countMembersInDept(@Param("entId") long entId, @Param("deptId") long deptId);
+
+    /** 同层同名（启用态）数量，用于友好报错（DB 唯一索引是最终防线）。 */
+    @Select("""
+            SELECT COUNT(*) FROM dept
+            WHERE enterprise_id = #{entId} AND parent_id = #{parentId}
+              AND name = #{name} AND status = 'active' AND id <> #{excludeId}
+            """)
+    int countSiblingName(@Param("entId") long entId, @Param("parentId") long parentId,
+                         @Param("name") String name, @Param("excludeId") long excludeId);
+
+    /** 插入部门（先占位 path，拿到 id 后再回填）。 */
+    @Insert("""
+            INSERT INTO dept(enterprise_id, parent_id, name, path, sort_no)
+            VALUES (#{entId}, #{parentId}, #{name}, #{tmpPath}, #{sortNo})
+            """)
+    @org.apache.ibatis.annotations.Options(useGeneratedKeys = true, keyProperty = "id")
+    int insertDept(Map<String, Object> row);
+
+    /** 回填自身 path（以及级联子孙）。 */
+    @Update("UPDATE dept SET path = #{path}, updated_at = now() WHERE id = #{id} AND enterprise_id = #{entId}")
+    int updateDeptPath(@Param("id") long id, @Param("entId") long entId, @Param("path") String path);
+
+    /**
+     * 级联改写子孙的 path：把 oldPrefix 换成 newPrefix。
+     *
+     * <p>移动部门时**必须**调用，否则子树的 path 还指向旧父级，
+     * 数据范围 {@code dept_subtree} 用 LIKE 前缀匹配会直接漏掉整个子树。
+     */
+    @Update("""
+            UPDATE dept
+            SET path = #{newPrefix} || SUBSTRING(path FROM LENGTH(#{oldPrefix}) + 1), updated_at = now()
+            WHERE enterprise_id = #{entId} AND path LIKE CONCAT(#{oldPrefix}, '%') AND id <> #{selfId}
+            """)
+    int rewriteDescendantPaths(@Param("entId") long entId, @Param("oldPrefix") String oldPrefix,
+                               @Param("newPrefix") String newPrefix, @Param("selfId") long selfId);
+
+    /**
+     * 改名 / 改父 / 改排序。
+     *
+     * <p>⚠️ {@code parentId} 必须是包装类型 {@code Long}：顶层部门传 {@code null}，
+     * 用基本类型会在调用处拆箱 NPE（真实踩过）。
+     */
+    @Update("""
+            UPDATE dept SET name = #{name}, parent_id = #{parentId}, sort_no = #{sortNo}, updated_at = now()
+            WHERE id = #{id} AND enterprise_id = #{entId}
+            """)
+    int updateDept(@Param("id") long id, @Param("entId") long entId,
+                   @Param("name") String name, @Param("parentId") Long parentId,
+                   @Param("sortNo") int sortNo);
+
+    @Delete("DELETE FROM dept WHERE id = #{id} AND enterprise_id = #{entId}")
+    int deleteDept(@Param("id") long id, @Param("entId") long entId);
+
+    // ── 角色权限点分配 ─────────────────────────────────────────
+
+    /** 角色是否属于该企业。 */
+    @Select("SELECT COUNT(*) FROM role WHERE id = #{roleId} AND enterprise_id = #{entId}")
+    int countRoleInEnterprise(@Param("roleId") long roleId, @Param("entId") long entId);
+
+    @Select("SELECT permission_code FROM role_permission WHERE role_id = #{roleId}")
+    List<String> selectRolePermCodes(@Param("roleId") long roleId);
+
+    @Delete("DELETE FROM role_permission WHERE role_id = #{roleId}")
+    int clearRolePerms(@Param("roleId") long roleId);
+
+    @Insert("""
+            <script>
+            INSERT INTO role_permission(role_id, permission_code) VALUES
+            <foreach collection="codes" item="c" separator=",">(#{roleId}, #{c})</foreach>
+            ON CONFLICT DO NOTHING
+            </script>
+            """)
+    int addRolePerms(@Param("roleId") long roleId, @Param("codes") List<String> codes);
+
+    /**
+     * 平台级权限点（不可授予企业角色）。
+     *
+     * <p>判定依据：{@code group_code = 'release_sys'}（发布与系统，共 5 项）。
+     * 这是 V2025 种子数据里平台级权限点所在的分组。
+     */
+    @Select("""
+            <script>
+            SELECT code FROM permission WHERE group_code = 'release_sys' AND code IN
+            <foreach collection="codes" item="c" open="(" separator="," close=")">#{c}</foreach>
+            </script>
+            """)
+    List<String> selectPlatformOnlyAmong(@Param("codes") List<String> codes);
 }

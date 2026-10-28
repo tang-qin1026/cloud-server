@@ -70,10 +70,43 @@ public class PortalJwtVerifier {
             throw new JwtException("门户令牌缺少 sub");
         }
         String uname = claims.get("uname", String.class);
-        return new PortalToken(sub, uname);
+
+        // 租户三件套（V2025/M2）。兼容数字与字符串两种编码：门户可能把 ent 序列化成字符串。
+        Integer ut = asInt(claims.get("ut"));
+        Long ent = asLong(claims.get("ent"));
+        Integer er = asInt(claims.get("er"));
+
+        // ut=1（企业员工）却没有 ent → 必须拒绝。
+        // 若放行并退化成个人域，企业数据会写进 enterprise_id=0，事后无法区分归属。
+        if (ut != null && ut == 1 && ent == null) {
+            throw new JwtException("企业员工令牌缺少 ent");
+        }
+
+        return new PortalToken(sub, uname, ut, ent, er);
     }
 
     /** 门户身份：sub = 门户用户 UUID；uname = 门户用户名（可空，仅用于展示/排障）。 */
-    public record PortalToken(String portalUserId, String username) {
+    public record PortalToken(String portalUserId, String username,
+                              Integer userType, Long enterpriseId, Integer enterpriseRole) {
+
+        /** 兼容两参构造（旧调用点/测试）。 */
+        public PortalToken(String portalUserId, String username) {
+            this(portalUserId, username, null, null, null);
+        }
+    }
+    /** JWT claim 可能是数字、字符串或缺失，统一转 Integer。 */
+    private static Integer asInt(Object v) {
+        if (v == null) { return null; }
+        if (v instanceof Number n) { return n.intValue(); }
+        String s = v.toString().trim();
+        return s.isEmpty() ? null : Integer.valueOf(s);
+    }
+
+    /** 同上，转 Long。 */
+    private static Long asLong(Object v) {
+        if (v == null) { return null; }
+        if (v instanceof Number n) { return n.longValue(); }
+        String s = v.toString().trim();
+        return s.isEmpty() ? null : Long.valueOf(s);
     }
 }
