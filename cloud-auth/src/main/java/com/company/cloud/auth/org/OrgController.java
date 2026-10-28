@@ -216,4 +216,34 @@ public class OrgController {
     /** 角色权限入参：传"最终应当拥有的权限点 code 列表"（整体覆盖）。 */
     public record RolePermissionsRequest(List<String> codes) {
     }
+    // ── 角色 CRUD ──────────────────────────────────────────────
+
+    /** 新建自定义角色。code 建后不可改，name 可改。 */
+    @PostMapping("/org/roles")
+    public Result<Map<String, Object>> createRole(
+            Authentication authentication,
+            @RequestBody RoleRequest req) {
+        return Result.ok(orgService.createRole(currentUser(authentication), req.code(), req.name()));
+    }
+
+    /** 改角色名（code 不变，权限绑定不受影响）。 */
+    @PutMapping("/org/roles/{id}")
+    public Result<Void> renameRole(
+            Authentication authentication,
+            @PathVariable long id,
+            @RequestBody RoleRequest req) {
+        orgService.renameRole(currentUser(authentication), id, req.name());
+        return Result.ok();
+    }
+
+    /** 删除自定义角色（内置角色不可删；仍有成员绑定不可删）。 */
+    @DeleteMapping("/org/roles/{id}")
+    public Result<Void> deleteRole(Authentication authentication, @PathVariable long id) {
+        orgService.deleteRole(currentUser(authentication), id);
+        return Result.ok();
+    }
+
+    /** 角色入参：新建时 code + name 都必填；改名时只用 name。 */
+    public record RoleRequest(String code, String name) {
+    }
 }

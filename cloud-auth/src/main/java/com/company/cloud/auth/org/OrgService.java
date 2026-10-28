@@ -729,4 +729,87 @@ public class OrgService {
         }
         return n;
     }
+    // ── 角色 CRUD ─────────────────────────────────────────────
+
+    /**
+     * 新建自定义角色。
+     *
+     * <p>code 是权限绑定的依据，**建后不可改**（改名只改 name）。
+     * code 只允许小写字母/数字/下划线，避免前端拼 key 时出问题。
+     */
+    @Transactional
+    public Map<String, Object> createRole(CurrentUser cu, String code, String name) {
+        long entId = requireEnterpriseContext();
+        requirePerm(cu, "role.manage");
+
+        String c = code == null ? "" : code.trim().toLowerCase(java.util.Locale.ROOT);
+        if (c.isEmpty() || !c.matches("^[a-z0-9_]{1,48}$")) {
+            throw new BizException(ErrorCode.BAD_REQUEST,
+                    "角色 code 只能是小写字母/数字/下划线，长度 1~48：" + code);
+        }
+        if ("sys_admin".equals(c)) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "sys_admin 是平台保留角色，不能创建");
+        }
+        String n = requireName2(name, "角色名称", 64);
+        if (orgWriteMapper.countRoleCode(entId, c) > 0) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "角色 code 已存在：" + c);
+        }
+
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("entId", entId);
+        row.put("code", c);
+        row.put("name", n);
+        orgWriteMapper.insertRole(row);
+        Object id = row.get("id");
+        return Map.of("id", id == null ? 0L : id, "code", c, "name", n, "builtin", false);
+    }
+
+    /** 改角色名（code 不变，权限绑定不受影响）。 */
+    @Transactional
+    public void renameRole(CurrentUser cu, long roleId, String name) {
+        long entId = requireEnterpriseContext();
+        requirePerm(cu, "role.manage");
+        Boolean builtin = orgWriteMapper.selectRoleBuiltin(roleId, entId);
+        if (builtin == null) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "角色不属于本企业：" + roleId);
+        }
+        String n = requireName2(name, "角色名称", 64);
+        orgWriteMapper.renameRole(roleId, entId, n);
+    }
+
+    /**
+     * 删除自定义角色。
+     *
+     * <p>两道闸：内置角色不可删；仍绑定成员不可删（要求先解绑，避免成员突然失去全部权限）。
+     */
+    @Transactional
+    public void deleteRole(CurrentUser cu, long roleId) {
+        long entId = requireEnterpriseContext();
+        requirePerm(cu, "role.manage");
+        Boolean builtin = orgWriteMapper.selectRoleBuiltin(roleId, entId);
+        if (builtin == null) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "角色不属于本企业：" + roleId);
+        }
+        if (Boolean.TRUE.equals(builtin)) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "内置角色不可删除，只能改权限点");
+        }
+        int members = orgWriteMapper.countRoleMembers(roleId);
+        if (members > 0) {
+            throw new BizException(ErrorCode.BAD_REQUEST,
+                    "还有 " + members + " 名成员绑定了该角色，请先解绑");
+        }
+        orgWriteMapper.deleteRole(roleId, entId);
+    }
+
+    /** 通用名称校验。 */
+    private static String requireName2(String value, String label, int maxLen) {
+        if (value == null || value.isBlank()) {
+            throw new BizException(ErrorCode.BAD_REQUEST, label + "不能为空");
+        }
+        String v = value.trim();
+        if (v.length() > maxLen) {
+            throw new BizException(ErrorCode.BAD_REQUEST, label + "不能超过 " + maxLen + " 字");
+        }
+        return v;
+    }
 }

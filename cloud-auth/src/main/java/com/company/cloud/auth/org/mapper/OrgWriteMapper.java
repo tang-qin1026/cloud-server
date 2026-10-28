@@ -207,4 +207,36 @@ public interface OrgWriteMapper {
             </script>
             """)
     List<String> selectPlatformOnlyAmong(@Param("codes") List<String> codes);
+    // ── 角色 CRUD ──────────────────────────────────────────────
+
+    /** 同企业下 code 是否已占用（DB 的 uk_role_code 是最终防线，这里给友好报错）。 */
+    @Select("SELECT COUNT(*) FROM role WHERE enterprise_id = #{entId} AND code = #{code}")
+    int countRoleCode(@Param("entId") long entId, @Param("code") String code);
+
+    /** 插入自定义角色（builtin = FALSE）。 */
+    @Insert("""
+            INSERT INTO role(enterprise_id, code, name, builtin)
+            VALUES (#{entId}, #{code}, #{name}, FALSE)
+            """)
+    @org.apache.ibatis.annotations.Options(useGeneratedKeys = true, keyProperty = "id")
+    int insertRole(Map<String, Object> row);
+
+    /** 改角色名（code 不可改：它是权限绑定的依据）。 */
+    @Update("""
+            UPDATE role SET name = #{name}, updated_at = now()
+            WHERE id = #{id} AND enterprise_id = #{entId}
+            """)
+    int renameRole(@Param("id") long id, @Param("entId") long entId, @Param("name") String name);
+
+    /** 是否内置角色（内置角色不可删除）。 */
+    @Select("SELECT builtin FROM role WHERE id = #{id} AND enterprise_id = #{entId}")
+    Boolean selectRoleBuiltin(@Param("id") long id, @Param("entId") long entId);
+
+    /** 已绑定该角色的成员数（删除前检查）。 */
+    @Select("SELECT COUNT(*) FROM user_role WHERE role_id = #{roleId}")
+    int countRoleMembers(@Param("roleId") long roleId);
+
+    /** 删除自定义角色（builtin=FALSE 作为最后一道闸）。 */
+    @Delete("DELETE FROM role WHERE id = #{id} AND enterprise_id = #{entId} AND builtin = FALSE")
+    int deleteRole(@Param("id") long id, @Param("entId") long entId);
 }
