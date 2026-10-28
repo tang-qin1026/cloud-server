@@ -1,6 +1,6 @@
 package com.company.cloud.portal.config;
 
-import com.company.cloud.portal.filter.InternalKeyFilter;
+import com.company.cloud.portal.filter.InternalServiceAuthFilter;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -21,9 +21,18 @@ import org.springframework.core.Ordered;
 public class InternalFilterConfig {
 
     @Bean
-    public FilterRegistrationBean<InternalKeyFilter> internalKeyFilterRegistration(PortalProperties props) {
-        FilterRegistrationBean<InternalKeyFilter> bean =
-                new FilterRegistrationBean<>(new InternalKeyFilter(props));
+    public FilterRegistrationBean<InternalServiceAuthFilter> internalAuthFilterRegistration(
+            PortalProperties props,
+            com.company.cloud.auth.portal.ServiceAuthProperties svcProps,
+            com.company.cloud.auth.portal.ServiceCredentialVerifier verifier,
+            com.company.cloud.auth.portal.PortalJwksClient jwksClient,
+            org.springframework.data.redis.core.StringRedisTemplate redis) {
+        // 《27》改造：优先服务凭据（RS256），未配置时该 Filter 内部自动回退 X-Internal-Key。
+        // 因此这里直接取代旧的 InternalKeyFilter 注册，而不是两个一起挂——
+        // 两个一起挂会导致 disabled 时旧 Filter 仍然生效、enabled 时旧 Filter 误拒。
+        FilterRegistrationBean<InternalServiceAuthFilter> bean =
+                new FilterRegistrationBean<>(new InternalServiceAuthFilter(
+                        props, svcProps, verifier, jwksClient, redis));
         bean.addUrlPatterns("/internal/*");
         bean.setName("portalInternalKeyFilter");
         bean.setOrder(Ordered.HIGHEST_PRECEDENCE + 10);

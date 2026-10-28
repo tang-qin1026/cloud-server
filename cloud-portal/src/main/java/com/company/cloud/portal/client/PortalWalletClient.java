@@ -38,6 +38,20 @@ import java.util.Map;
 @Component
 public class PortalWalletClient {
 
+    /**
+     * 服务凭据签发器（《27》§6.2 出站签名）。
+     *
+     * <p>用 {@code @Autowired(required = false)} 字段注入而非构造器参数：
+     * 本类构造器被既有代码/测试直接调用，加参数会连带改无关代码。
+     * 未注入或未配置私钥时**自动回退到旧的 X-Internal-Key**，便于灰度与回滚。
+     */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.company.cloud.auth.portal.ServiceCredentialSigner serviceSigner;
+
+    /** 自行序列化用：必须拿到与发送完全一致的字节，才能算对 body_sha256。 */
+    private static final com.fasterxml.jackson.databind.ObjectMapper JSON =
+            new com.fasterxml.jackson.databind.ObjectMapper();
+
     private final PortalProperties props;
     private final ObjectMapper objectMapper;
     private final RestClient restClient;
@@ -98,15 +112,41 @@ public class PortalWalletClient {
 
     private PortalApiResponse post(String path, Object body) {
         String url = props.getBaseUrl() + path;
+
+        // ① 自行序列化：body_sha256 必须对**实际发送的字节**计算。
+        //    若交给 RestClient 内部序列化，我们拿不到那份字节，hash 必然对不上。
+        byte[] bodyBytes = null;
+        if (body != null) {
+            try {
+                bodyBytes = JSON.writeValueAsString(body).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            } catch (Exception e) {
+                throw new PortalTransportException("请求体序列化失败: " + e.getMessage(), e);
+            }
+        }
+
+        // ② 认证头：优先服务凭据（RS256），未配置则回退旧密钥（灰度/回滚用）
+        String authHeader;
+        String authValue;
+        if (serviceSigner != null && serviceSigner.isReady()) {
+            authHeader = "Authorization";
+            // 出站请求无 query，传 null 即空串
+            authValue = "Bearer " + serviceSigner.sign("POST", path, null, bodyBytes);
+        } else {
+            authHeader = "X-Internal-Key";
+            authValue = props.getInternalKey() == null ? "" : props.getInternalKey();
+            log.debug("[portal] 服务凭据未启用，回退 X-Internal-Key path={}", path);
+        }
+
         String raw;
         try {
-            raw = restClient.post()
+            var spec = restClient.post()
                     .uri(url)
-                    .header("X-Internal-Key", props.getInternalKey() == null ? "" : props.getInternalKey())
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .body(body)
-                    .retrieve()
-                    .body(String.class);
+                    .header(authHeader, authValue)
+                    .contentType(MediaType.APPLICATION_JSON);
+            if (bodyBytes != null) {
+                spec = spec.body(bodyBytes);
+            }
+            raw = spec.retrieve().body(String.class);
         } catch (HttpClientErrorException | HttpServerErrorException e) {
             // 门户可能用非 2xx 状态码承载业务码（例如 401 + {"code":1002}）。
             // 只要响应体是规范的 {code,...} 信封，就按业务响应返回给上层分类——
