@@ -33,6 +33,8 @@ public class PortalShadowUserService {
 
     private final PortalUserMapRepository mapRepository;
     private final UserRepository userRepository;
+    /** 影子企业 upsert：本地没有门户企业行时补一行。 */
+    private final com.company.cloud.auth.org.mapper.OrgWriteMapper orgWriteMapper;
     private final PortalShadowUserCreator creator;
 
     /**
@@ -103,6 +105,13 @@ public class PortalShadowUserService {
                 && !java.util.Objects.equals(enterpriseRole.shortValue(), user.getEnterpriseRole())) {
             user.setEnterpriseRole(enterpriseRole.shortValue());
             changed = true;
+        }
+        // 影子企业：本地没有这行的话，/admin/login 查不到企业状态会 fail-closed，
+        // 门户的企业管理员就永远进不了管理端。这里按门户的 ent 建/补一行。
+        if (enterpriseId != null) {
+            Long owner = (enterpriseRole != null && enterpriseRole == 1) ? user.getId() : null;
+            orgWriteMapper.upsertPortalEnterprise(
+                    enterpriseId, "portal-" + enterpriseId, "企业 #" + enterpriseId, owner);
         }
         if (changed) {
             userRepository.save(user);

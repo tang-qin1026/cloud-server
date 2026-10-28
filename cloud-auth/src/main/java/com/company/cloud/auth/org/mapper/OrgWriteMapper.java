@@ -239,4 +239,28 @@ public interface OrgWriteMapper {
     /** 删除自定义角色（builtin=FALSE 作为最后一道闸）。 */
     @Delete("DELETE FROM role WHERE id = #{id} AND enterprise_id = #{entId} AND builtin = FALSE")
     int deleteRole(@Param("id") long id, @Param("entId") long entId);
+    // ── 影子企业（门户企业的本地投影）──────────────────────────
+
+    /**
+     * 按门户的 enterprise_id 建/补本地企业行。
+     *
+     * <p><b>为什么必须有</b>：企业归属的权威在门户，我们只投影。但
+     * {@code /admin/login} 判定企业管理员时要查本地 {@code enterprise.status}
+     * （见 AuthService.isActiveEnterpriseAdmin）——本地没有这行就查不到状态，
+     * fail-closed 直接拒绝。表现为「门户注册的企业管理员永远进不了管理端」。
+     *
+     * <p>用显式 id 插入（BIGSERIAL 允许），保证本地 id 与门户 {@code ent} 一致；
+     * {@code ON CONFLICT} 时只补 owner（不覆盖已有值），name/code 留给后台同步修正。
+     */
+    @Insert("""
+            INSERT INTO enterprise(id, code, name, status, owner_user_id)
+            VALUES (#{id}, #{code}, #{name}, 'active', #{ownerUserId})
+            ON CONFLICT (id) DO UPDATE
+              SET owner_user_id = COALESCE(enterprise.owner_user_id, EXCLUDED.owner_user_id),
+                  updated_at = now()
+            """)
+    int upsertPortalEnterprise(@Param("id") long id,
+                               @Param("code") String code,
+                               @Param("name") String name,
+                               @Param("ownerUserId") Long ownerUserId);
 }
