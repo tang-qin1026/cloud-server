@@ -38,6 +38,10 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class AuthService {
 
+    /** 企业状态查询，用于判定企业管理员是否仍有效。 */
+    @org.springframework.beans.factory.annotation.Autowired
+    private com.company.cloud.auth.tenant.mapper.EnterpriseStatusMapper enterpriseStatusMapper;
+
     private final UserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
     private final JwtService jwtService;
@@ -135,8 +139,13 @@ public class AuthService {
             auditService.loginFail(user.getUsername(), ip);
             throw new BizException(ErrorCode.ACCOUNT_DISABLED);
         }
-        // 本入口只服务管理员；普通用户（含门户影子用户）不得从这里登录
-        if (!user.isAdmin()) {
+        // 本入口服务两种管理员（方案 A：先把门放开，菜单由前端按 scope 自己裁）：
+        //   ① 平台管理员   role = admin
+        //   ② 企业管理员   enterprise_role = 1 且所属企业 status = active
+        // 其余（普通成员、个人用户）仍然拒绝。
+        boolean platformAdmin = user.isAdmin();
+        boolean enterpriseAdmin = isActiveEnterpriseAdmin(user);
+        if (!platformAdmin && !enterpriseAdmin) {
             throttle.recordFailure(ip);
             auditService.loginFail(user.getUsername(), ip);
             throw new BizException(ErrorCode.FORBIDDEN);
@@ -304,6 +313,19 @@ public class AuthService {
         m.put("lastLoginAt", user.getLastLoginAt());
         m.put("extraBytes", user.getExtraBytes() == null ? 0L : user.getExtraBytes());
         m.put("extraExpireAt", user.getExtraExpireAt());
+        // v2 单一管理端最小契约：前端据此决定菜单与路由
+        //   platform   -> 平台管理员，全量视图
+        //   enterprise -> 企业管理员，受限视图（本企业）
+        //   null       -> 普通用户，不进管理端
+        m.put("enterpriseId", user.getEnterpriseId());
+        m.put("enterpriseRole", user.getEnterpriseRole() == null ? 0 : user.getEnterpriseRole());
+        if (user.isAdmin()) {
+            m.put("scope", "platform");
+        } else if (user.isEnterpriseAdmin()) {
+            m.put("scope", "enterprise");
+        } else {
+            m.put("scope", null);
+        }
                 return m;
     }
 
@@ -318,5 +340,29 @@ public class AuthService {
     private long refreshRemainingMillis(Claims claims) {
         Date exp = claims.getExpiration();
         return exp == null ? 0 : Math.max(0, exp.getTime() - System.currentTimeMillis());
+    }
+    // ── 企业管理员判定（方案 A）────────────────────────────────
+
+    /**
+     * 是否有效的企业管理员：{@code enterprise_role = 1} 且所属企业 {@code status = active}。
+     *
+     * <p>必须查企业状态：企业被停用/驳回后管理员旧 token 仍在有效期内，
+     * 只看 enterprise_role 就放行，等于停用后仍能进管理端。
+     *
+     * <p>用字段注入而非构造器：AuthService 的构造器被既有单测直接调用，
+     * 加参数会连带改测试（与本次改造无关的改动面）。
+     */
+    private boolean isActiveEnterpriseAdmin(User user) {
+        if (!user.isEnterpriseAdmin() || user.isPersonal()) {
+            return false;
+        }
+        try {
+            String status = enterpriseStatusMapper.selectStatus(user.getEnterpriseId());
+            return "active".equals(status);
+        } catch (Exception e) {
+            log.warn("[admin-login] 企业状态查询失败，按不可用处理 userId={} err={}",
+                    user.getId(), e.toString());
+            return false;
+        }
     }
 }
