@@ -28,32 +28,24 @@ import java.util.Set;
 public final class EnterpriseAdminPermissions {
 
     /**
-     * 企业管理员的默认权限点（25 项）。
+     * 企业管理员**由身份自带**的权限点（11 项，全部是「管理员侧」）。
+     *
+     * <p><b>用户端权限不在这里</b>（2026-10-29 口径变更）：
+     * 文件 / 回收站 / 传输 / 配额这些"使用产品"的权限，
+     * 企业管理员与我们普通成员**走同一套** —— 由他被分配的**成员角色**决定，
+     * 而不是因为"他是管理员"就自动拥有。
+     *
+     * <p>理由：管理员身份只应带来"管理本企业"的能力，不该顺带获得"使用网盘"的能力。
+     * 否则会出现"管理员被撤掉成员角色后仍能上传下载"这种自相矛盾的状态。
+     *
+     * <p>所以有效权限 = 本集合 ∪ 其角色已授予的权限（见 {@code RbacService.effectivePermissions}）。
+     * 管理员要用文件功能，需要给自己（或由他人）分配一个成员角色。
      *
      * <p>用 {@link LinkedHashSet} 而非 {@code Set.of}：前者保证返回顺序稳定，
      * 便于前端菜单渲染与人工核对；{@code Set.of} 的迭代顺序未定义。
      */
     public static final Set<String> CODES = java.util.Collections.unmodifiableSet(
             new LinkedHashSet<>(List.of(
-                    // 文件
-                    "file.read",
-                    "file.upload",
-                    "file.modify",
-                    "file.delete",
-
-                    "file.other.delete",
-                    // 回收站
-                    "recycle.read",
-                    "recycle.restore",
-                    "recycle.purge",
-                    // 传输
-                    "transfer.read",
-                    "transfer.control",
-                    // 配额与计费（本企业口径）
-                    "quota.read",
-                    "billing.read",
-                    "increase.apply",
-                    "increase.read",
                     // 组织
                     "org.dept.read",
                     "org.dept.manage",
@@ -93,9 +85,9 @@ public final class EnterpriseAdminPermissions {
      * 组织管理、角色管理、审计与大盘属于**管理员职责**，只能由管理员本人持有，
      * 不能通过角色下放给员工。
      *
-     * <p>因此 {@link #CODES}（25 项）− {@link #ASSIGNABLE_BY_ENTERPRISE_ADMIN}（14 项）
-     * = 11 项仅管理员自持：{@code org.dept.*} / {@code org.member.*} / {@code role.*} /
-     * {@code admin.audit.*} / {@code admin.dashboard.*}。
+     * <p>这 14 项与 {@link #CODES}（管理员侧 11 项）**互不重叠**：
+     * 前者是"员工能使用的功能"，后者是"管理员能管理的东西"。
+     * 企业管理员的有效权限 = 11 项 ∪ 其角色授予的权限。
      */
     public static final Set<String> ASSIGNABLE_BY_ENTERPRISE_ADMIN =
             java.util.Collections.unmodifiableSet(new LinkedHashSet<>(List.of(
