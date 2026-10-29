@@ -16,14 +16,12 @@ import com.company.cloud.files.recycle.dto.SubtreeFile;
 import com.company.cloud.files.recycle.ref.RefCountClient;
 import com.company.cloud.files.recycle.service.RecycleService;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 import java.util.Map;
 
-@Slf4j
 @Service
 @RequiredArgsConstructor
 public class RecycleServiceImpl implements RecycleService {
@@ -31,7 +29,6 @@ public class RecycleServiceImpl implements RecycleService {
     private final FileNodeMapper mapper;
     private final RefCountClient refCountClient;
     private final AuditService auditService;
-    private final com.company.cloud.auth.org.OrgService orgService;
 
     /** 回收站保留期（天），与 R-C06 定时清理同一配置口径（recycle.retention-days）。 */
     @Value("${recycle.retention-days:30}")
@@ -91,13 +88,7 @@ public class RecycleServiceImpl implements RecycleService {
         // 彻底删除对「回收站里的项」和「还没删的活文件」都成立（前者来自回收站页，
         // 后者来自 DELETE /files/{id}?force=1）。只有"不是我的"才算不存在。
         FileNode node = mapper.selectById(id);
-        if (node == null) {
-            throw new BizException(ErrorCode.FILE_NOT_FOUND);
-        }
-        // 「能看到就能删」（2026-10-29 口径）：owner 落在调用方数据范围内即可，
-        // 不再要求必须是自己的。看不到的按不存在处理。
-        long owner = node.getOwnerId() == null ? 0L : node.getOwnerId();
-        if (!resolveVisibleOwnerIds(userId).contains(owner)) {
+        if (node == null || !userId.equals(node.getOwnerId())) {
             throw new BizException(ErrorCode.FILE_NOT_FOUND);
         }
         boolean wasInRecycle = node.getDeletedAt() != null;
@@ -106,17 +97,17 @@ public class RecycleServiceImpl implements RecycleService {
         // 两条 SQL 必须与"节点是否在回收站"匹配：回收站版 CTE 带 deleted_at IS NOT NULL，
         // 对活文件会返回 0 行 → 配额不释放、引用计数不减。
         List<SubtreeFile> files = wasInRecycle
-                ? mapper.selectSubtreeFiles(owner, id)
-                : mapper.selectSubtreeFilesAny(owner, id);
+                ? mapper.selectSubtreeFiles(userId, id)
+                : mapper.selectSubtreeFilesAny(userId, id);
         long bytes = files.stream().mapToLong(f -> f.getSize() == null ? 0L : f.getSize()).sum();
 
         if (wasInRecycle) {
-            mapper.deleteCascadePhysical(owner, id);
+            mapper.deleteCascadePhysical(userId, id);
         } else {
-            mapper.deleteCascadePhysicalAny(owner, id);
+            mapper.deleteCascadePhysicalAny(userId, id);
         }
         if (bytes > 0) {
-            mapper.releaseQuota(owner, bytes);
+            mapper.releaseQuota(userId, bytes);
         }
         // 每个内容哈希递减引用计数（R-C07；计数归 0 的物理清理由 B 组负责）
         files.stream()
@@ -185,23 +176,5 @@ public class RecycleServiceImpl implements RecycleService {
             i++;
         }
         return stem + " (" + i + ")" + ext;
-    }
-    /**
-     * 调用方数据范围内可见的 owner id 集合（含自己）。
-     *
-     * <p>拿不到身份时 **fail-closed**：只返回自己。与 {@code FileNodeServiceImpl} 同口径。
-     */
-    private java.util.List<Long> resolveVisibleOwnerIds(Long userId) {
-        try {
-            var auth = org.springframework.security.core.context.SecurityContextHolder
-                    .getContext().getAuthentication();
-            if (auth != null
-                    && auth.getPrincipal() instanceof com.company.cloud.auth.security.CurrentUser cu) {
-                return orgService.visibleOwnerIds(cu);
-            }
-        } catch (Exception e) {
-            log.warn("[scope] 解析数据范围失败，回退为仅自己 userId={} err={}", userId, e.toString());
-        }
-        return java.util.List.of(userId);
     }
 }
