@@ -108,6 +108,18 @@ public class PortalShadowUserService {
         }
         // 影子企业：本地没有这行的话，/admin/login 查不到企业状态会 fail-closed，
         // 门户的企业管理员就永远进不了管理端。这里按门户的 ent 建/补一行。
+        // 企业管理员默认 data_scope = all（本企业内全权）。
+        //
+        // 不这么做的话，影子用户建出来是实体默认值 self，
+        // 结果企业管理员打开成员列表只能看到自己 —— 看起来像"员工列表坏了"。
+        // 数据范围的**上限**仍由 enterprise_id 兜住（跨企业依然看不到）。
+        if (enterpriseRole != null && enterpriseRole == 1
+                && ("self".equals(user.getDataScope()) || user.getDataScope() == null)) {
+            user.setDataScope("all");
+            changed = true;
+            log.info("[portal] 企业管理员 data_scope 提升为 all userId={} enterpriseId={}",
+                    user.getId(), enterpriseId);
+        }
         if (enterpriseId != null) {
             Long owner = (enterpriseRole != null && enterpriseRole == 1) ? user.getId() : null;
             orgWriteMapper.upsertPortalEnterprise(

@@ -41,6 +41,16 @@ public class OrgService {
     private final OrgQueryMapper orgMapper;
     private final OrgWriteMapper orgWriteMapper;
     private final RbacQueryMapper rbacMapper;
+
+    /**
+     * 企业成员同步端口（实现由 cloud-portal 提供）。
+     *
+     * <p>用 {@link ObjectProvider} 而非直接注入：cloud-auth 不依赖 cloud-portal，
+     * 若某次部署没带 cloud-portal（或单测环境），这里拿不到实现也不该让整个应用起不来。
+     */
+    @org.springframework.beans.factory.annotation.Autowired
+    private org.springframework.beans.factory.ObjectProvider<
+            com.company.cloud.auth.portal.EnterpriseMemberSyncPort> memberSyncPort;
     private final com.company.cloud.auth.rbac.RbacService rbacService;
 
     // ── 当前用户上下文 ───────────────────────────────────────────
@@ -194,6 +204,11 @@ public class OrgService {
     /** {@code GET /users}：成员列表（分页）。 */
     public Map<String, Object> members(String keyword, String status, Long deptId, int page, int size) {
         Long entId = tenantIdForRead();
+        // 企业管理员看成员列表前，先从门户补一遍本企业成员。
+        //
+        // 不补的话列表里只有"登录过的人"：门户注册的员工没登录过 → 本地没有影子行 →
+        // 企业管理员会看到"成员数 1"，而门户显示 3，看起来像功能坏了。
+        syncMembersIfEnterpriseAdmin(entId);
         int p = Math.max(page, 1);
         int s = Math.min(Math.max(size, 1), 100);
         long total = orgMapper.countMembers(entId, keyword, status, deptId);
@@ -860,5 +875,34 @@ public class OrgService {
             throw new BizException(ErrorCode.BAD_REQUEST, label + "不能超过 " + maxLen + " 字");
         }
         return v;
+    }
+    /**
+     * 仅企业管理员触发成员同步（平台管理员不需要：它看的是企业目录，不是本地成员）。
+     *
+     * <p>失败**不阻断**列表：门户抖动时至少还能看到本地已有成员，只是新员工暂时缺席。
+     */
+    private void syncMembersIfEnterpriseAdmin(Long entId) {
+        if (entId == null || entId <= 0L) {
+            return;
+        }
+        var auth = org.springframework.security.core.context.SecurityContextHolder
+                .getContext().getAuthentication();
+        if (auth == null
+                || !(auth.getPrincipal() instanceof com.company.cloud.auth.security.CurrentUser cu)) {
+            return;
+        }
+        if (!cu.isEnterpriseAdmin() || cu.isAdmin()) {
+            return;
+        }
+        var port = memberSyncPort == null ? null : memberSyncPort.getIfAvailable();
+        if (port == null) {
+            return;
+        }
+        try {
+            port.syncMembers(entId);
+        } catch (Exception e) {
+            log.warn("[members] 门户成员同步失败，本次仅展示本地已有成员 entId={} err={}",
+                    entId, e.toString());
+        }
     }
 }
