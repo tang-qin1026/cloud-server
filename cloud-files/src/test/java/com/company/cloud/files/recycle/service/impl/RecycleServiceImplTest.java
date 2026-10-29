@@ -72,10 +72,15 @@ class RecycleServiceImplTest {
         return n;
     }
 
+    @Mock
+    private com.company.cloud.auth.org.OrgService orgService;
+
     @BeforeEach
     void setUp() {
-        service = new RecycleServiceImpl(mapper, refCountClient, auditService);
+        service = new RecycleServiceImpl(mapper, refCountClient, auditService, orgService);
         ReflectionTestUtils.setField(service, "retentionDays", 30);
+        // 无 SecurityContext 时 helper 走 fail-closed 分支，不会调用 orgService；
+        // 这里保留 mock 以适配构造器参数。
     }
 
     @Test

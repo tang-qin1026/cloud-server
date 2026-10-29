@@ -235,9 +235,20 @@ public class FileNodeServiceImpl implements FileNodeService {
     @Override
     @Transactional
     public void delete(Long userId, Long id) {
-        // 递归 CTE 一次 UPDATE 标记自身 + 全部子孙；
-        // 幂等：不存在或已删除时影响行数为 0，按契约直接视为成功，不报错
-        mapper.softDeleteCascade(userId, id);
+        // 幂等：不存在或已删除 → 直接视为成功（契约要求，不报错）
+        FileNode node = mapper.selectById(id);
+        if (node == null || node.getDeletedAt() != null) {
+            return;
+        }
+        // 「能看到就能删」（2026-10-29 口径）：
+        // 目标文件的 owner 只要落在调用方的**数据范围**内就允许删除，不再要求"自己的"。
+        // 看不到的按**不存在**处理（404），避免通过删除接口探测他人文件是否存在。
+        if (!resolveVisibleOwnerIds(userId).contains(node.getOwnerId())) {
+            throw new BizException(ErrorCode.FILE_NOT_FOUND);
+        }
+        // 用目标文件的真实 owner 作为 SQL 的归属锚点：
+        // 软删 CTE 的锚点是 (id, owner_id)，传 owner 才能正确命中。
+        mapper.softDeleteCascade(node.getOwnerId(), id);
     }
 
     // ---------- 内部工具 ----------
