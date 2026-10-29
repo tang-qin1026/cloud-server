@@ -799,7 +799,16 @@ public class OrgService {
         if (orgWriteMapper.countRoleInEnterprise(roleId, entId) == 0) {
             throw new BizException(ErrorCode.BAD_REQUEST, "角色不属于本企业：" + roleId);
         }
-        List<String> want = codes == null ? List.of() : codes.stream()
+        // codes == null 一律拒绝，不能当成"清空"。
+        //
+        // 原因：请求体字段名写错（例如前端传 permissions 而 DTO 是 codes）时，
+        // Jackson 会静默绑定为 null；若把 null 当"清空"，一次手误就会抹掉整个角色的
+        // 权限，而且接口返回 code=0，前端完全无感。清空必须显式传 []。
+        if (codes == null) {
+            throw new BizException(ErrorCode.BAD_REQUEST,
+                    "codes 不能为 null；清空角色权限请显式传空数组 []");
+        }
+        List<String> want = codes.stream()
                 .filter(c -> c != null && !c.isBlank()).distinct().toList();
 
         if (!want.isEmpty()) {
