@@ -46,11 +46,12 @@ public class RbacService {
      */
     private static final List<Template> TEMPLATES = List.of(
             new Template("dept_admin", "部门管理员", new String[]{
-                    "file.download", "file.upload", "file.modify", "file.delete",
+                    "file.read", "file.upload", "file.modify", "file.delete",
+                    "file.other.read",
                     "recycle.read", "recycle.restore", "recycle.purge",
                     "quota.read"}),
             new Template("member", "成员", new String[]{
-                    "file.download", "file.upload", "file.modify", "file.delete",
+                    "file.read", "file.upload", "file.modify", "file.delete",
                     "recycle.read", "recycle.restore", "recycle.purge",
                     "transfer.read", "transfer.control",
                     "quota.read", "billing.read",
