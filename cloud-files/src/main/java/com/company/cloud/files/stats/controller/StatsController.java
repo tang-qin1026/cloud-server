@@ -25,11 +25,15 @@ import org.springframework.web.bind.annotation.RestController;
 @RequiredArgsConstructor
 public class StatsController {
 
+    /** 权限点校验：权限配置必须真实生效。 */
+    private final com.company.cloud.auth.rbac.PermissionChecker permissionChecker;
+
     private final StatsService statsService;
 
     @Operation(summary = "存储概览（R-C10）：文件/目录/字节/今日新增/回收站/类型分布")
     @GetMapping("/overview")
     public Result<StatsOverview> overview(Authentication authentication) {
+        permissionChecker.require(cu(authentication), "quota.read");
         return Result.ok(statsService.overview(currentUserId(authentication)));
     }
 
@@ -37,6 +41,12 @@ public class StatsController {
     private Long currentUserId(Authentication authentication) {
         if (authentication != null && authentication.getPrincipal() instanceof CurrentUser cu) {
             return cu.getId();
+        }
+        throw new BizException(ErrorCode.TOKEN_INVALID);
+    }
+    private CurrentUser cu(Authentication authentication) {
+        if (authentication != null && authentication.getPrincipal() instanceof CurrentUser c) {
+            return c;
         }
         throw new BizException(ErrorCode.TOKEN_INVALID);
     }

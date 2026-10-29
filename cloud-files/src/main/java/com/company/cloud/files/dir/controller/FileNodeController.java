@@ -39,6 +39,8 @@ import org.springframework.web.bind.annotation.RestController;
 @RequiredArgsConstructor
 public class FileNodeController {
 
+    /** 权限点校验：权限配置必须真实生效，不能只靠前端隐藏入口。 */
+    private final com.company.cloud.auth.rbac.PermissionChecker permissionChecker;
     private final FileNodeService fileNodeService;
     private final RecycleService recycleService;
 
@@ -51,12 +53,14 @@ public class FileNodeController {
             @RequestParam(defaultValue = "20") int size,
             @RequestParam(required = false) String sort,
             @RequestParam(required = false) String keyword) {
+        permissionChecker.require(cu(authentication), "file.read");
         return Result.ok(fileNodeService.list(currentUserId(authentication), parent, page, size, sort, keyword));
     }
 
     @Operation(summary = "目录树：一次性返回当前用户全部目录（扁平 id+parentId 列表，前端自行建树）")
     @GetMapping("/tree")
     public Result<java.util.List<FileNodeVO>> tree(Authentication authentication) {
+        permissionChecker.require(cu(authentication), "file.read");
         return Result.ok(fileNodeService.tree(currentUserId(authentication)));
     }
 
@@ -65,6 +69,7 @@ public class FileNodeController {
     public Result<FileNodeVO> mkdir(
             Authentication authentication,
             @Valid @RequestBody MkdirRequest request) {
+        permissionChecker.require(cu(authentication), "file.upload");
         return Result.ok(fileNodeService.mkdir(currentUserId(authentication), request));
     }
 
@@ -74,6 +79,7 @@ public class FileNodeController {
             Authentication authentication,
             @PathVariable Long id,
             @Valid @RequestBody UpdateNodeRequest request) {
+        permissionChecker.require(cu(authentication), "file.modify");
         return Result.ok(fileNodeService.update(currentUserId(authentication), id, request));
     }
 
@@ -82,6 +88,7 @@ public class FileNodeController {
     public Result<java.util.List<FileNodeVO>> batchMove(
             Authentication authentication,
             @Valid @RequestBody BatchMoveRequest request) {
+        permissionChecker.require(cu(authentication), "file.modify");
         return Result.ok(fileNodeService.batchMove(currentUserId(authentication), request));
     }
 
@@ -97,6 +104,13 @@ public class FileNodeController {
             fileNodeService.delete(currentUserId(authentication), id);
         }
         return Result.ok();
+    }
+
+    private CurrentUser cu(Authentication authentication) {
+        if (authentication != null && authentication.getPrincipal() instanceof CurrentUser c) {
+            return c;
+        }
+        throw new BizException(ErrorCode.TOKEN_INVALID);
     }
 
     /** 当前用户 id：从 SecurityContext 取（A 组 JwtAuthFilter 注入 CurrentUser），与 B 组 UploadController 一致。 */

@@ -32,15 +32,19 @@ import org.springframework.web.bind.annotation.RestController;
 @RequiredArgsConstructor
 public class BillingController {
 
+    /** 权限点校验：权限配置必须真实生效。 */
+    private final com.company.cloud.auth.rbac.PermissionChecker permissionChecker;
     private final BillingService billingService;
 
     @GetMapping("/config")
-    public Result<ConfigView> config() {
+    public Result<ConfigView> config(Authentication authentication) {
+        permissionChecker.require(currentUser(authentication), "billing.read");
         return Result.ok(billingService.getConfig());
     }
 
     @GetMapping("/quota")
     public Result<QuotaView> quota(Authentication authentication) {
+        permissionChecker.require(currentUser(authentication), "quota.read");
         return Result.ok(billingService.getQuota(currentUser(authentication)));
     }
 
@@ -48,6 +52,7 @@ public class BillingController {
     public Result<BillingService.CreateResult> createRequest(
             Authentication authentication,
             @Valid @RequestBody CreateIncreaseRequest req) {
+        permissionChecker.require(currentUser(authentication), "increase.apply");
         return Result.ok(billingService.createIncreaseRequest(currentUser(authentication), req));
     }
 
@@ -56,6 +61,7 @@ public class BillingController {
             Authentication authentication,
             @RequestParam(defaultValue = "1") int page,
             @RequestParam(defaultValue = "20") int size) {
+        permissionChecker.require(currentUser(authentication), "increase.read");
         return Result.ok(billingService.listMyRequests(currentUser(authentication), page, size));
     }
 

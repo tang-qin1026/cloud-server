@@ -26,15 +26,20 @@ import java.util.Map;
 @RestController
 public class UploadController {
 
+    /** 权限点校验：权限配置必须真实生效。 */
+    private final com.company.cloud.auth.rbac.PermissionChecker permissionChecker;
     private final UploadService uploadService;
 
-    public UploadController(UploadService uploadService) {
+    public UploadController(UploadService uploadService,
+                            com.company.cloud.auth.rbac.PermissionChecker permissionChecker) {
         this.uploadService = uploadService;
+        this.permissionChecker = permissionChecker;
     }
 
     /** R-B01/R-B02：初始化上传（含秒传分支）；返回 done 或 uploading + uploadId + chunkSize。 */
     @PostMapping("/uploads/init")
     public Result<Map<String, Object>> init(@Valid @RequestBody InitRequest req, Authentication authentication) {
+        permissionChecker.require(cu(authentication), "file.upload");
         UploadService.InitResult r = uploadService.init(
                 currentUserId(authentication), req.name(), req.size(), req.parentId(), req.sha256());
         if (r.done()) {
@@ -50,6 +55,7 @@ public class UploadController {
                              @PathVariable("no") int no,
                              Authentication authentication,
                              HttpServletRequest http) throws Exception {
+        permissionChecker.require(cu(authentication), "file.upload");
         long size = http.getContentLengthLong();
         uploadService.part(currentUserId(authentication), id, no, http.getInputStream(), size);
         return Result.ok();
@@ -59,6 +65,7 @@ public class UploadController {
     @GetMapping("/uploads/{id}")
     public Result<UploadService.SessionStatus> status(@PathVariable("id") Long id,
                                                       Authentication authentication) {
+        permissionChecker.require(cu(authentication), "transfer.read");
         return Result.ok(uploadService.status(currentUserId(authentication), id));
     }
 
@@ -69,6 +76,7 @@ public class UploadController {
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "10") int size,
             Authentication authentication) {
+        permissionChecker.require(cu(authentication), "transfer.read");
         return Result.ok(uploadService.listTasks(currentUserId(authentication), status, page, size));
     }
 
@@ -76,12 +84,14 @@ public class UploadController {
     @PostMapping("/uploads/{id}/complete")
     public Result<UploadService.CompleteResult> complete(@PathVariable("id") Long id,
                                                          Authentication authentication) {
+        permissionChecker.require(cu(authentication), "file.upload");
         return Result.ok(uploadService.complete(currentUserId(authentication), id));
     }
 
     /** 取消上传（幂等）。 */
     @PostMapping("/uploads/{id}/abort")
     public Result<Void> abort(@PathVariable("id") Long id, Authentication authentication) {
+        permissionChecker.require(cu(authentication), "file.upload");
         uploadService.abort(currentUserId(authentication), id);
         return Result.ok();
     }
@@ -90,12 +100,15 @@ public class UploadController {
     @DeleteMapping("/uploads/{id}")
     public Result<Void> deleteTask(@PathVariable("id") Long id, Authentication authentication) {
         uploadService.deleteTask(currentUserId(authentication), id);
+        permissionChecker.require(cu(authentication), "transfer.control");
+        uploadService.deleteTask(currentUserId(authentication), id);
         return Result.ok();
     }
 
     /** R-B04d：清空已完成任务记录，返回删除条数。 */
     @PostMapping("/uploads/clear-completed")
     public Result<Integer> clearCompleted(Authentication authentication) {
+        permissionChecker.require(cu(authentication), "transfer.control");
         return Result.ok(uploadService.clearCompleted(currentUserId(authentication)));
     }
 
@@ -104,11 +117,19 @@ public class UploadController {
     public Result<Map<String, String>> download(@PathVariable("id") Long id,
                                                 @RequestParam(required = false) Boolean inline,
                                                 Authentication authentication) {
+        permissionChecker.require(cu(authentication), "file.read");
         String url = uploadService.presignDownload(currentUserId(authentication), id, Boolean.TRUE.equals(inline));
         return Result.ok(Map.of("url", url));
     }
 
     // ============ 当前用户 id：从 SecurityContext 取（A 组 JwtAuthFilter 注入 CurrentUser） ============
+    private CurrentUser cu(Authentication authentication) {
+        if (authentication != null && authentication.getPrincipal() instanceof CurrentUser c) {
+            return c;
+        }
+        throw new BizException(ErrorCode.TOKEN_INVALID);
+    }
+
     private Long currentUserId(Authentication authentication) {
         if (authentication != null && authentication.getPrincipal() instanceof CurrentUser cu) {
             return cu.getId();

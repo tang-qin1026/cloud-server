@@ -32,6 +32,8 @@ import org.springframework.web.bind.annotation.RestController;
 @RequiredArgsConstructor
 public class RecycleController {
 
+    /** 权限点校验：权限配置必须真实生效，不能只靠前端隐藏入口。 */
+    private final com.company.cloud.auth.rbac.PermissionChecker permissionChecker;
     private final RecycleService recycleService;
 
     @Operation(summary = "回收站列表（R-C05）：parent 空/0 返回顶层，parent>0 返回子项；按删除时间倒序；含 deletedAt/expireAt")
@@ -41,6 +43,7 @@ public class RecycleController {
             @RequestParam(defaultValue = "1") int page,
             @RequestParam(defaultValue = "20") int size,
             @RequestParam(required = false) Long parent) {
+        permissionChecker.require(cu(authentication), "recycle.read");
         return Result.ok(recycleService.list(currentUserId(authentication), page, size, parent));
     }
 
@@ -51,7 +54,15 @@ public class RecycleController {
             @PathVariable Long id,
             @RequestBody(required = false) RestoreRequest request) {
         Long targetParentId = request == null ? null : request.targetParentId();
+        permissionChecker.require(cu(authentication), "recycle.restore");
         return Result.ok(recycleService.restore(currentUserId(authentication), id, targetParentId));
+    }
+
+    private CurrentUser cu(Authentication authentication) {
+        if (authentication != null && authentication.getPrincipal() instanceof CurrentUser c) {
+            return c;
+        }
+        throw new BizException(ErrorCode.TOKEN_INVALID);
     }
 
     /** 当前用户 id：从 SecurityContext 取（A 组 JwtAuthFilter 注入 CurrentUser），与 B 组 UploadController 一致。 */

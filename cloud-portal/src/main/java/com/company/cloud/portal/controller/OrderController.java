@@ -158,8 +158,12 @@ public class OrderController {
                         "内部调用失败（凭据无效或过期，请联系运维）");
             }
             case 1004 -> throw new BizException(ErrorCode.BAD_REQUEST, "下单被拒绝：" + msg);
-            case 3001 -> throw new BizException(ErrorCode.BAD_REQUEST, "余额不足，请先充值：" + msg);
-            case 3002 -> throw new BizException(ErrorCode.BAD_REQUEST, "钱包已冻结，请联系客服：" + msg);
+            // 门户这两个码的 message 往往与我们的话术重复（"余额不足" / "钱包冻结"），
+            // 直接用合并版，避免出现"余额不足，请先充值：余额不足"
+            case 3001 -> throw new BizException(ErrorCode.BAD_REQUEST,
+                    "钱包余额不足，请先充值（门户不返回具体余额）");
+            case 3002 -> throw new BizException(ErrorCode.BAD_REQUEST,
+                    "钱包已冻结，请联系门户客服");
             case PORTAL_ORDER_NOT_FOUND -> throw new BizException(ErrorCode.BAD_REQUEST, "订单不存在");
             case 4002 -> throw new BizException(ErrorCode.BAD_REQUEST, "订单状态不允许该操作：" + msg);
             case 4003, 4004 -> throw new BizException(ErrorCode.BAD_REQUEST, "商品不可售：" + msg);
