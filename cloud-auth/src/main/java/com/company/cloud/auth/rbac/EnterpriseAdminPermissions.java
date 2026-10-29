@@ -28,7 +28,7 @@ import java.util.Set;
 public final class EnterpriseAdminPermissions {
 
     /**
-     * 企业管理员的默认权限点（26 项）。
+     * 企业管理员的默认权限点（25 项）。
      *
      * <p>用 {@link LinkedHashSet} 而非 {@code Set.of}：前者保证返回顺序稳定，
      * 便于前端菜单渲染与人工核对；{@code Set.of} 的迭代顺序未定义。
@@ -40,7 +40,7 @@ public final class EnterpriseAdminPermissions {
                     "file.upload",
                     "file.modify",
                     "file.delete",
-                    "file.other.read",
+
                     "file.other.delete",
                     // 回收站
                     "recycle.read",
@@ -87,13 +87,13 @@ public final class EnterpriseAdminPermissions {
         return code != null && CODES.contains(code);
     }
     /**
-     * 企业管理员**可以下放给员工**的权限点（15 项）。
+     * 企业管理员**可以下放给员工**的权限点（14 项）。
      *
      * <p>口径：员工只做"自己的事"——文件、回收站、传输、配额查看与增额申请。
      * 组织管理、角色管理、审计与大盘属于**管理员职责**，只能由管理员本人持有，
      * 不能通过角色下放给员工。
      *
-     * <p>因此 {@link #CODES}（26 项）− {@link #ASSIGNABLE_BY_ENTERPRISE_ADMIN}（15 项）
+     * <p>因此 {@link #CODES}（25 项）− {@link #ASSIGNABLE_BY_ENTERPRISE_ADMIN}（14 项）
      * = 11 项仅管理员自持：{@code org.dept.*} / {@code org.member.*} / {@code role.*} /
      * {@code admin.audit.*} / {@code admin.dashboard.*}。
      */
@@ -104,7 +104,7 @@ public final class EnterpriseAdminPermissions {
                     "file.upload",
                     "file.modify",
                     "file.delete",
-                    "file.other.read",
+
                     "file.other.delete",
                     // 回收站
                     "recycle.read",
