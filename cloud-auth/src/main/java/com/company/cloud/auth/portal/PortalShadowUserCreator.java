@@ -36,8 +36,15 @@ public class PortalShadowUserCreator {
             return existing.getLocalUserId();
         }
 
+        // nickname 存门户的**真实用户名**（lcrA / lcr1 …）：
+        // username 必须是全局唯一且不能与本地已有账号撞名，所以用 portal_<uuid>；
+        // 但界面上要显示可读的名字，因此把 uname 落到 nickname。
+        // 不写的话前端只能显示 username（即 portal_<uuid>），成员列表全是 id。
+        String nickname = (uname == null || uname.isBlank()) ? null : uname.trim();
+
         User user = User.builder()
                 .username(uniqueUsername(portalUserId))
+                .nickname(nickname)
                 .passwordHash(props.getShadowPasswordHash())
                 .role("user")
                 .quotaBytes(props.getShadowDefaultQuotaBytes())

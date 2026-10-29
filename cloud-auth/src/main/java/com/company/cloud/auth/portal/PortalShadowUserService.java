@@ -108,13 +108,23 @@ public class PortalShadowUserService {
         }
         // 影子企业：本地没有这行的话，/admin/login 查不到企业状态会 fail-closed，
         // 门户的企业管理员就永远进不了管理端。这里按门户的 ent 建/补一行。
+        // 回填 nickname：存量影子用户的 nickname 为空（建档时没写），
+        // 借登录/同步时把门户真实用户名补上，前端就不用再显示 portal_<uuid>。
+        if (uname != null && !uname.isBlank()
+                && (user.getNickname() == null || user.getNickname().isBlank())) {
+            user.setNickname(uname.trim());
+            changed = true;
+        }
         // 企业管理员默认 data_scope = all（本企业内全权）。
         //
         // 不这么做的话，影子用户建出来是实体默认值 self，
         // 结果企业管理员打开成员列表只能看到自己 —— 看起来像"员工列表坏了"。
         // 数据范围的**上限**仍由 enterprise_id 兜住（跨企业依然看不到）。
+        // ⚠️ 必须用 getDataScopeRaw()：User.getDataScope() 是重写过的 getter，
+        // 返回的是**对外大写档位名**（SELF/DEPT/...），拿它跟 "self" 比较永远为假。
+        String rawScope = user.getDataScopeRaw();
         if (enterpriseRole != null && enterpriseRole == 1
-                && ("self".equals(user.getDataScope()) || user.getDataScope() == null)) {
+                && (rawScope == null || "self".equals(rawScope))) {
             user.setDataScope("all");
             changed = true;
             log.info("[portal] 企业管理员 data_scope 提升为 all userId={} enterpriseId={}",

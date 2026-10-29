@@ -255,4 +255,10 @@ public interface OrgQueryMapper {
             </script>
             """)
     List<Map<String, Object>> selectRolesByUserIds(@Param("userIds") List<Long> userIds);
+    /** 取某用户在本企业下的 enterprise_role（1 = 企业管理员）；不存在或跨企业返回 null。 */
+    @Select("""
+            SELECT enterprise_role FROM users
+             WHERE id = #{userId} AND enterprise_id = #{entId}
+            """)
+    Integer selectEnterpriseRole(@Param("userId") long userId, @Param("entId") long entId);
 }

@@ -380,7 +380,16 @@ public class OrgService {
             throw new BizException(ErrorCode.BAD_REQUEST, "部门不属于本企业：" + deptId);
         }
 
-        int n = orgWriteMapper.updateMemberScope(userId, entId, deptId, normalizeScope(dataScope));
+        // 企业管理员的 data_scope 固定 all：他的身份就是"本企业全权"。
+        // 若允许改成 self，会出现"企业管理员在成员列表只看到自己 / 文件只看到自己的"
+        // 这种看起来像故障的状态（真实发生过：前端在成员管理页保存时把管理员改成了仅个人）。
+        Integer er = orgMapper.selectEnterpriseRole(userId, entId);
+        String dbScope = (er != null && er == 1) ? "all" : normalizeScope(dataScope);
+        if (er != null && er == 1 && !"all".equalsIgnoreCase(normalizeScope(dataScope))) {
+            log.info("[org] 企业管理员 data_scope 强制为 all userId={} 原请求={}", userId, dataScope);
+        }
+
+        int n = orgWriteMapper.updateMemberScope(userId, entId, deptId, dbScope);
         if (n == 0) {
             // 归属条件没过：要么用户不存在，要么不属于本企业 —— 统一按不存在处理
             throw new BizException(ErrorCode.USER_NOT_FOUND);
