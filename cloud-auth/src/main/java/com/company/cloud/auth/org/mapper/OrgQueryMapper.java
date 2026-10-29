@@ -238,4 +238,21 @@ public interface OrgQueryMapper {
             WHERE u.id = #{userId}
             """)
     Map<String, Object> selectUserDeptPath(@Param("userId") long userId);
+    /**
+     * 批量查"用户 → 角色"（供 {@code GET /users} 回显角色用）。
+     *
+     * <p>用一条 IN 查询代替 N+1：成员列表一页最多 100 人，
+     * 逐人查角色会产生 100 次往返。
+     */
+    @Select("""
+            <script>
+            SELECT ur.user_id, r.id AS role_id, r.code, r.name
+            FROM user_role ur
+            JOIN role r ON r.id = ur.role_id
+            WHERE ur.user_id IN
+            <foreach collection="userIds" item="id" open="(" separator="," close=")">#{id}</foreach>
+            ORDER BY r.builtin DESC, r.id
+            </script>
+            """)
+    List<Map<String, Object>> selectRolesByUserIds(@Param("userIds") List<Long> userIds);
 }

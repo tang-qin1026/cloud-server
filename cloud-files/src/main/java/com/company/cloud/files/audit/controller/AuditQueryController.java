@@ -39,6 +39,8 @@ public class AuditQueryController {
     private final AuditLogMapper auditLogMapper;
     /** M3 数据范围：审计日志按范围限定可见的操作者。 */
     private final com.company.cloud.auth.org.OrgService orgService;
+    /** 权限点校验（审计查看需要 admin.audit.read）。 */
+    private final com.company.cloud.auth.rbac.PermissionChecker permissionChecker;
 
     @Operation(summary = "分页查询审计日志（R-C09）：admin 全查，普通用户仅本人")
     @GetMapping
@@ -52,6 +54,11 @@ public class AuditQueryController {
             @RequestParam(defaultValue = "20") int size) {
 
         CurrentUser cu = currentUser(authentication);
+        // 2026-10-29 收口：审计日志此前**没有任何权限校验**，
+        // 员工账号（13 项用户端权限）也能直接查到数据范围内容。
+        // 审计属管理员职责，统一要求 admin.audit.read
+        // （企业管理员的 25 项里有；员工没有 → 40301）。
+        permissionChecker.require(cu, "admin.audit.read");
 
         QueryWrapper<AuditLog> qw = new QueryWrapper<>();
         if (cu.isAdmin()) {

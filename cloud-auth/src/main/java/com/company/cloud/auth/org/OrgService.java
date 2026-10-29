@@ -114,9 +114,22 @@ public class OrgService {
 
     // ── 角色 ───────────────────────────────────────────────────
 
-    /** {@code GET /org/roles}：本企业角色（平台管理员看全部）。 */
-    public List<Map<String, Object>> roles() {
+    /**
+     * {@code GET /org/roles}：**本企业**角色。
+     *
+     * <p>平台管理员调用会 40000「需要企业上下文」：它没有"某一家企业"的语境，
+     * 之前返回所有企业的角色（实测 6 条，dept_admin/member 各 3 份），
+     * 前端做下拉/筛选时会出现重名重复项，属误导。
+     *
+     * <p>需要看某家企业的角色时，应以该企业管理员身份调用（或用企业详情页）。
+     */
+    public List<Map<String, Object>> roles(com.company.cloud.auth.security.CurrentUser cu) {
+        requirePerm(cu, "role.read");
         Long entId = tenantIdForRead();
+        if (entId == null || entId == 0L) {
+            throw new BizException(ErrorCode.BAD_REQUEST,
+                    "角色列表需要企业上下文：平台管理员/个人域账号不适用，请用企业账号访问");
+        }
         // 企业首次访问时惰性创建 4 个内置角色（靠 uk_role_code 防并发生成两份）。
         // 这是文档 §3.3-3 要求的行为，也是"角色由产品侧管理、门户不存角色"的落地方式。
         if (entId != null && entId != 0L) {
@@ -138,7 +151,7 @@ public class OrgService {
     }
 
     private List<Map<String, Object>> rolesOf(CurrentUser cu) {
-        List<Map<String, Object>> all = roles();
+        List<Map<String, Object>> all = rolesOfEnterpriseOrAll(cu);
         Set<Long> mine = new LinkedHashSet<>(rgbs(orgMapper.selectUserRoleIds(cu.getId())));
         List<Map<String, Object>> out = new ArrayList<>();
         for (Map<String, Object> r : all) {
@@ -158,7 +171,8 @@ public class OrgService {
      * <p>返回扁平的 {@code id/parentId} 而不是嵌套结构：前端建树更灵活，
      * 且分页/搜索时不用反复展开。
      */
-    public Map<String, Object> deptTree(String status) {
+    public Map<String, Object> deptTree(com.company.cloud.auth.security.CurrentUser cu, String status) {
+        requirePerm(cu, "org.dept.read");
         Long entId = tenantIdForRead();
         List<Map<String, Object>> rows = orgMapper.selectDepts(entId, status);
 
@@ -202,7 +216,9 @@ public class OrgService {
     // ── 成员列表 ───────────────────────────────────────────────
 
     /** {@code GET /users}：成员列表（分页）。 */
-    public Map<String, Object> members(String keyword, String status, Long deptId, int page, int size) {
+    public Map<String, Object> members(com.company.cloud.auth.security.CurrentUser cu,
+                                       String keyword, String status, Long deptId, int page, int size) {
+        requirePerm(cu, "org.member.read");
         Long entId = tenantIdForRead();
         // 企业管理员看成员列表前，先从门户补一遍本企业成员。
         //
@@ -215,10 +231,34 @@ public class OrgService {
         List<Map<String, Object>> rows = orgMapper.selectMembers(
                 entId, keyword, status, deptId, s, (p - 1) * s);
 
+        // 批量取"用户 → RBAC 角色"，一次 IN 查询，避免每人一次往返
+        List<Long> ids = new ArrayList<>(rows.size());
+        for (Map<String, Object> u : rows) {
+            Object id = u.get("id");
+            if (id instanceof Number n) {
+                ids.add(n.longValue());
+            }
+        }
+        Map<Long, List<Map<String, Object>>> rolesByUser = new LinkedHashMap<>();
+        if (!ids.isEmpty()) {
+            for (Map<String, Object> r : orgMapper.selectRolesByUserIds(ids)) {
+                Object uid = r.get("user_id");
+                if (uid instanceof Number n) {
+                    rolesByUser.computeIfAbsent(n.longValue(), k -> new ArrayList<>())
+                            .add(Map.of(
+                                    "id", r.get("role_id"),
+                                    "code", r.get("code"),
+                                    "name", r.get("name")));
+                }
+            }
+        }
+
         List<Map<String, Object>> list = new ArrayList<>(rows.size());
         for (Map<String, Object> u : rows) {
             Map<String, Object> m = new LinkedHashMap<>();
-            m.put("id", u.get("id"));
+            Object idObj = u.get("id");
+            long uid = idObj instanceof Number n ? n.longValue() : 0L;
+            m.put("id", idObj);
             m.put("username", u.get("username"));
             m.put("nickname", u.get("nickname"));
             m.put("enterpriseId", u.get("enterprise_id"));
@@ -228,6 +268,11 @@ public class OrgService {
             m.put("dataScope", upperScope(str(u.get("data_scope"))));
             m.put("status", u.get("status"));
             m.put("lastLoginAt", u.get("last_login_at"));
+            // RBAC 角色（注意与 role = user/admin 的账号类型、enterpriseRole = 0/1 区分开）
+            List<Map<String, Object>> rs = rolesByUser.getOrDefault(uid, List.of());
+            m.put("roles", rs);
+            // 兼容单角色写法：取第一个角色 id，前端不想改数组也能用
+            m.put("roleId", rs.isEmpty() ? null : rs.get(0).get("id"));
             list.add(m);
         }
         return Map.of("total", total, "list", list);
@@ -904,5 +949,28 @@ public class OrgService {
             log.warn("[members] 门户成员同步失败，本次仅展示本地已有成员 entId={} err={}",
                     entId, e.toString());
         }
+    }
+    /**
+     * {@code /me/context.roles} 内部用：不校验权限。
+     *
+     * <p>平台管理员没有"本企业"，返回空列表即可 —— 它的身份由
+     * {@code isPlatformAdmin} 表达，不靠 RBAC 角色。
+     */
+    private List<Map<String, Object>> rolesOfEnterpriseOrAll(
+            com.company.cloud.auth.security.CurrentUser cu) {
+        Long entId = tenantIdForRead();
+        if (entId == null || entId == 0L) {
+            return List.of();
+        }
+        List<Map<String, Object>> rows = orgMapper.selectRoles(entId);
+        List<Map<String, Object>> out = new ArrayList<>(rows.size());
+        for (Map<String, Object> r : rows) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("id", r.get("id"));
+            m.put("code", r.get("code"));
+            m.put("name", r.get("name"));
+            out.add(m);
+        }
+        return out;
     }
 }

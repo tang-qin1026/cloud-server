@@ -47,7 +47,7 @@ public class OrgController {
     @GetMapping("/org/roles")
     public Result<List<Map<String, Object>>> roles(Authentication authentication) {
         currentUser(authentication);
-        return Result.ok(orgService.roles());
+        return Result.ok(orgService.roles(currentUser(authentication)));
     }
 
     @GetMapping("/org/depts/tree")
@@ -55,7 +55,7 @@ public class OrgController {
             Authentication authentication,
             @RequestParam(required = false) String status) {
         currentUser(authentication);
-        return Result.ok(orgService.deptTree(status));
+        return Result.ok(orgService.deptTree(currentUser(authentication), status));
     }
 
     @GetMapping("/users")
@@ -67,7 +67,7 @@ public class OrgController {
             @RequestParam(defaultValue = "1") int page,
             @RequestParam(defaultValue = "20") int size) {
         currentUser(authentication);
-        return Result.ok(orgService.members(keyword, status, deptId, page, size));
+        return Result.ok(orgService.members(currentUser(authentication), keyword, status, deptId, page, size));
     }
 
     // 注：GET /admin/enterprises 与 /admin/enterprises/{id}/accounts 已移到
