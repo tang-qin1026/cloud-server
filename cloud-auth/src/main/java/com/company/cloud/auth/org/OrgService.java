@@ -724,10 +724,31 @@ public class OrgService {
                 .filter(c -> c != null && !c.isBlank()).distinct().toList();
 
         if (!want.isEmpty()) {
+            // 平台级权限点：任何企业角色都不能有（否则企业管理员能发全平台版本等）
             List<String> bad = orgWriteMapper.selectPlatformOnlyAmong(want);
             if (!bad.isEmpty()) {
                 throw new BizException(ErrorCode.BAD_REQUEST,
                         "企业角色不能授予平台级权限点：" + String.join(",", bad));
+            }
+
+            // 企业管理员：只能把「员工应得的 15 项」下放给员工。
+            // 组织/角色/审计/大盘这 11 项属管理员职责，不能通过角色给员工。
+            //
+            // 例外：角色**已持有**的权限点允许原样保留。
+            // 原因：内置模板（auditor 有 admin.audit.read、finance 有 admin.billing.*）
+            // 是系统初始化的，若不允许"保留"，管理员只改一个文件权限就会被整单拒绝。
+            // 该例外不放宽新增：不在集合内且角色原本没有的，一律拒绝。
+            if (cu.isEnterpriseAdmin() && !cu.isAdmin()) {
+                List<String> current = orgWriteMapper.selectRolePermCodes(roleId);
+                List<String> notAssignable = want.stream()
+                        .filter(c -> !EnterpriseAdminPermissions.canAssignToEmployee(c))
+                        .filter(c -> !current.contains(c))
+                        .toList();
+                if (!notAssignable.isEmpty()) {
+                    throw new BizException(ErrorCode.BAD_REQUEST,
+                            "企业管理员只能给员工分配文件/回收站/传输/配额类权限，以下不能下放："
+                                    + String.join(",", notAssignable));
+                }
             }
         }
         orgWriteMapper.clearRolePerms(roleId);

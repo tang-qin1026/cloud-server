@@ -86,4 +86,42 @@ public final class EnterpriseAdminPermissions {
     public static boolean grants(String code) {
         return code != null && CODES.contains(code);
     }
+    /**
+     * 企业管理员**可以下放给员工**的权限点（15 项）。
+     *
+     * <p>口径：员工只做"自己的事"——文件、回收站、传输、配额查看与增额申请。
+     * 组织管理、角色管理、审计与大盘属于**管理员职责**，只能由管理员本人持有，
+     * 不能通过角色下放给员工。
+     *
+     * <p>因此 {@link #CODES}（26 项）− {@link #ASSIGNABLE_BY_ENTERPRISE_ADMIN}（15 项）
+     * = 11 项仅管理员自持：{@code org.dept.*} / {@code org.member.*} / {@code role.*} /
+     * {@code admin.audit.*} / {@code admin.dashboard.*}。
+     */
+    public static final Set<String> ASSIGNABLE_BY_ENTERPRISE_ADMIN =
+            java.util.Collections.unmodifiableSet(new LinkedHashSet<>(List.of(
+                    // 文件
+                    "file.read",
+                    "file.upload",
+                    "file.modify",
+                    "file.delete",
+                    "file.other.read",
+                    "file.other.delete",
+                    // 回收站
+                    "recycle.read",
+                    "recycle.restore",
+                    "recycle.purge",
+                    // 传输
+                    "transfer.read",
+                    "transfer.control",
+                    // 配额与计费（本企业口径）
+                    "quota.read",
+                    "billing.read",
+                    "increase.apply",
+                    "increase.read"
+            )));
+
+    /** 企业管理员可下放给该权限点吗。 */
+    public static boolean canAssignToEmployee(String code) {
+        return code != null && ASSIGNABLE_BY_ENTERPRISE_ADMIN.contains(code);
+    }
 }
