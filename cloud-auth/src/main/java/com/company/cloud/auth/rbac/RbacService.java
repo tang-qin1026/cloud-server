@@ -29,24 +29,33 @@ import java.util.Set;
 @RequiredArgsConstructor
 public class RbacService {
 
-    /** 4 个内置角色模板（企业管理员不在其中——它是 {@code enterprise_role=1}，不占角色行）。 */
+    /**
+     * **2 个**内置角色模板（企业管理员不在其中——它是 {@code enterprise_role=1}，不占角色行）。
+     *
+     * <p>2026-10-28 口径：企业管理员可下放给员工的权限只有 15 项
+     * （{@code file.*} / {@code recycle.*} / {@code transfer.*} / {@code quota.read} /
+     * {@code billing.read} / {@code increase.apply} / {@code increase.read}），
+     * 所以内置角色也只能由这 15 项组成。
+     *
+     * <p>已移除的两个角色：
+     * <ul>
+     *   <li>{@code auditor}（审计员）—— 全部内容 {@code admin.audit.read}，属管理员职责</li>
+     *   <li>{@code finance}（财务审批）—— 全部内容 {@code admin.billing.*}，属平台级</li>
+     * </ul>
+     * 它们作为"员工角色"与新口径冲突：会让员工拿到管理员才该有的权限。
+     */
     private static final List<Template> TEMPLATES = List.of(
             new Template("dept_admin", "部门管理员", new String[]{
                     "file.read", "file.upload", "file.modify", "file.delete",
                     "file.other.read",
                     "recycle.read", "recycle.restore", "recycle.purge",
-                    "quota.read", "org.member.read", "admin.dashboard.read"}),
+                    "quota.read"}),
             new Template("member", "成员", new String[]{
                     "file.read", "file.upload", "file.modify", "file.delete",
                     "recycle.read", "recycle.restore", "recycle.purge",
                     "transfer.read", "transfer.control",
                     "quota.read", "billing.read",
-                    "increase.apply", "increase.read"}),
-            new Template("auditor", "审计员", new String[]{
-                    "admin.audit.read"}),
-            new Template("finance", "财务审批", new String[]{
-                    "admin.billing.read", "admin.increase.read", "admin.increase.approve",
-                    "admin.ledger.read", "admin.ledger.export"}));
+                    "increase.apply", "increase.read"}));
 
     private record Template(String code, String name, String[] perms) {
     }
