@@ -55,6 +55,15 @@ public class PortalProperties {
      */
     private String enterprisesPath = "/api/internal/enterprises";
 
+    /**
+     * 服务端下单（docs/30）：{@code POST /api/internal/orders}。
+     *
+     * <p>用于"产品后端替用户下单并支付"——产品拿不到用户的门户 access_token 时走这条。
+     * <p>查开通结果：{@code GET /api/internal/orders/{order_id}}（同前缀 + 路径参数）。
+     * <p>⚠️ 门户侧默认**全禁**，需在 {@code SERVER_ORDER_PRODUCTS} 里开通本产品 code。
+     */
+    private String ordersPath = "/api/internal/orders";
+
     /** 某家企业的成员清单（docs/28 §3.1）：{@code GET /api/internal/enterprise-accounts}。 */
     private String enterpriseAccountsPath = "/api/internal/enterprise-accounts";
 

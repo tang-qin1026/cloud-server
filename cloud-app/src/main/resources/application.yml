@@ -134,6 +134,8 @@ app:
     # 企业清单与成员清单（docs/29）：平台管理员在产品后台查看门户企业
     enterprises-path: ${PORTAL_ENTERPRISES_PATH:/api/internal/enterprises}
     enterprise-accounts-path: ${PORTAL_ENTERPRISE_ACCOUNTS_PATH:/api/internal/enterprise-accounts}
+    # 服务端下单（docs/30）：产品替用户下单并支付；门户默认全禁，需 SERVICE_ORDER 白名单开通
+    orders-path: ${PORTAL_ORDERS_PATH:/api/internal/orders}
     connect-timeout-ms: ${PORTAL_CONNECT_TIMEOUT_MS:3000}
     read-timeout-ms: ${PORTAL_READ_TIMEOUT_MS:10000}
     deduct-retry-delays-ms: ${PORTAL_DEDUCT_RETRY_DELAYS_MS:1000,5000,30000}
