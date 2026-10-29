@@ -74,7 +74,9 @@ class RecycleServiceImplTest {
 
     @BeforeEach
     void setUp() {
-        service = new RecycleServiceImpl(mapper, refCountClient, auditService);
+        service = new RecycleServiceImpl(mapper, refCountClient, auditService,
+                org.mockito.Mockito.mock(com.company.cloud.auth.rbac.PermissionChecker.class),
+                org.mockito.Mockito.mock(com.company.cloud.auth.org.OrgService.class));
         ReflectionTestUtils.setField(service, "retentionDays", 30);
     }
 

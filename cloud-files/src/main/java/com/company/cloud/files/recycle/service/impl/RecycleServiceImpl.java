@@ -16,12 +16,14 @@ import com.company.cloud.files.recycle.dto.SubtreeFile;
 import com.company.cloud.files.recycle.ref.RefCountClient;
 import com.company.cloud.files.recycle.service.RecycleService;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 import java.util.Map;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class RecycleServiceImpl implements RecycleService {
@@ -29,6 +31,9 @@ public class RecycleServiceImpl implements RecycleService {
     private final FileNodeMapper mapper;
     private final RefCountClient refCountClient;
     private final AuditService auditService;
+    /** 权限点校验（file.delete / file.other.delete / recycle.purge）。 */
+    private final com.company.cloud.auth.rbac.PermissionChecker permissionChecker;
+    private final com.company.cloud.auth.org.OrgService orgService;
 
     /** 回收站保留期（天），与 R-C06 定时清理同一配置口径（recycle.retention-days）。 */
     @Value("${recycle.retention-days:30}")
@@ -88,26 +93,35 @@ public class RecycleServiceImpl implements RecycleService {
         // 彻底删除对「回收站里的项」和「还没删的活文件」都成立（前者来自回收站页，
         // 后者来自 DELETE /files/{id}?force=1）。只有"不是我的"才算不存在。
         FileNode node = mapper.selectById(id);
-        if (node == null || !userId.equals(node.getOwnerId())) {
+        if (node == null) {
             throw new BizException(ErrorCode.FILE_NOT_FOUND);
         }
+        long owner = node.getOwnerId() == null ? 0L : node.getOwnerId();
+        boolean own = userId.equals(owner);
+        // 归属与范围：自己的 → file.delete；他人但在范围内 → file.other.delete；范围外 → 404
+        if (!own && !resolveVisibleOwnerIds(userId).contains(owner)) {
+            throw new BizException(ErrorCode.FILE_NOT_FOUND);
+        }
+        requirePermForDelete(own);
+        // 彻底删除额外要求 recycle.purge（不可逆操作单独一个闸门）
+        requirePerm("recycle.purge");
         boolean wasInRecycle = node.getDeletedAt() != null;
 
         // 先收集子树文件清单（配额 + 引用计数用），再级联物理删除。
         // 两条 SQL 必须与"节点是否在回收站"匹配：回收站版 CTE 带 deleted_at IS NOT NULL，
         // 对活文件会返回 0 行 → 配额不释放、引用计数不减。
         List<SubtreeFile> files = wasInRecycle
-                ? mapper.selectSubtreeFiles(userId, id)
-                : mapper.selectSubtreeFilesAny(userId, id);
+                ? mapper.selectSubtreeFiles(owner, id)
+                : mapper.selectSubtreeFilesAny(owner, id);
         long bytes = files.stream().mapToLong(f -> f.getSize() == null ? 0L : f.getSize()).sum();
 
         if (wasInRecycle) {
-            mapper.deleteCascadePhysical(userId, id);
+            mapper.deleteCascadePhysical(owner, id);
         } else {
-            mapper.deleteCascadePhysicalAny(userId, id);
+            mapper.deleteCascadePhysicalAny(owner, id);
         }
         if (bytes > 0) {
-            mapper.releaseQuota(userId, bytes);
+            mapper.releaseQuota(owner, bytes);
         }
         // 每个内容哈希递减引用计数（R-C07；计数归 0 的物理清理由 B 组负责）
         files.stream()
@@ -176,5 +190,41 @@ public class RecycleServiceImpl implements RecycleService {
             i++;
         }
         return stem + " (" + i + ")" + ext;
+    }
+    /** 删除权限点：自己的 → file.delete；他人的 → file.other.delete。 */
+    private void requirePermForDelete(boolean own) {
+        requirePerm(own ? "file.delete" : "file.other.delete");
+    }
+
+    /** 权限点校验；拿不到 SecurityContext 时跳过（单测/系统内部调用）。 */
+    private void requirePerm(String code) {
+        try {
+            var auth = org.springframework.security.core.context.SecurityContextHolder
+                    .getContext().getAuthentication();
+            if (auth != null
+                    && auth.getPrincipal() instanceof com.company.cloud.auth.security.CurrentUser cu) {
+                permissionChecker.require(cu, code);
+            }
+        } catch (BizException e) {
+            throw e;
+        } catch (Exception e) {
+            log.warn("[perm] 权限校验异常，按拒绝处理 code={} err={}", code, e.toString());
+            throw new BizException(ErrorCode.FORBIDDEN, "缺少权限：" + code);
+        }
+    }
+
+    /** 数据范围内可见的 owner id 集合（含自己）；无身份时 fail-closed 只返回自己。 */
+    private java.util.List<Long> resolveVisibleOwnerIds(Long userId) {
+        try {
+            var auth = org.springframework.security.core.context.SecurityContextHolder
+                    .getContext().getAuthentication();
+            if (auth != null
+                    && auth.getPrincipal() instanceof com.company.cloud.auth.security.CurrentUser cu) {
+                return orgService.visibleOwnerIds(cu);
+            }
+        } catch (Exception e) {
+            log.warn("[scope] 解析数据范围失败，回退为仅自己 userId={} err={}", userId, e.toString());
+        }
+        return java.util.List.of(userId);
     }
 }

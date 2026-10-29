@@ -56,6 +56,7 @@ class FileNodeServiceImplTest {
     void setUp() {
         service = new FileNodeServiceImpl(
                 org.mockito.Mockito.mock(com.company.cloud.auth.org.OrgService.class),
+                org.mockito.Mockito.mock(com.company.cloud.auth.rbac.PermissionChecker.class),
                 mapper, auditService);
     }
 

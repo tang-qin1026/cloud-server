@@ -32,6 +32,8 @@ public class FileNodeServiceImpl implements FileNodeService {
 
     /** M3 数据范围：把 owner_id = me 放宽成范围内可见的人。 */
     private final OrgService orgService;
+    /** 权限点校验（删自己的 → file.delete；删他人 → file.other.delete）。 */
+    private final com.company.cloud.auth.rbac.PermissionChecker permissionChecker;
 
     /** 排序字段白名单（契约：禁止前端字段直接透传 SQL） */
     private static final Map<String, String> SORT_COLUMNS = Map.of(
@@ -235,9 +237,50 @@ public class FileNodeServiceImpl implements FileNodeService {
     @Override
     @Transactional
     public void delete(Long userId, Long id) {
-        // 递归 CTE 一次 UPDATE 标记自身 + 全部子孙；
-        // 幂等：不存在或已删除时影响行数为 0，按契约直接视为成功，不报错
-        mapper.softDeleteCascade(userId, id);
+        // 幂等：不存在或已删除 → 直接视为成功（契约要求，不报错）
+        FileNode node = mapper.selectById(id);
+        if (node == null || node.getDeletedAt() != null) {
+            return;
+        }
+
+        // 归属与范围判定（两个维度，缺一不可）：
+        //   自己的文件        → 需要 file.delete
+        //   他人但在数据范围内 → 需要 file.other.delete
+        //   不在数据范围内     → 按不存在处理（404），不通过删除接口泄露存在性
+        boolean own = userId.equals(node.getOwnerId());
+        if (!own && !resolveVisibleOwnerIds(userId).contains(node.getOwnerId())) {
+            throw new BizException(ErrorCode.FILE_NOT_FOUND);
+        }
+        requirePermForDelete(own);
+
+        // 软删 CTE 的锚点是 (id, owner_id)：删他人时必须传**文件的真实 owner**，
+        // 传调用者会命中 0 行（表现为"删了但没删掉"）。
+        mapper.softDeleteCascade(node.getOwnerId(), id);
+    }
+
+    /**
+     * 删除权限点校验。
+     *
+     * <p>{@code file.delete} 与 {@code file.other.delete} 是**两个独立勾选项**：
+     * 只勾前者 → 只能删自己的；只勾后者 → 只能删他人的；
+     * 都勾 → 两者都能删；都不勾 → 一律不能删。
+     *
+     * <p>拿不到 SecurityContext 时（单测、系统内部调用）跳过校验，保持既有行为。
+     */
+    private void requirePermForDelete(boolean own) {
+        try {
+            var auth = org.springframework.security.core.context.SecurityContextHolder
+                    .getContext().getAuthentication();
+            if (auth != null
+                    && auth.getPrincipal() instanceof com.company.cloud.auth.security.CurrentUser cu) {
+                permissionChecker.require(cu, own ? "file.delete" : "file.other.delete");
+            }
+        } catch (BizException e) {
+            throw e;
+        } catch (Exception e) {
+            log.warn("[perm] 删除权限校验异常，按拒绝处理 err={}", e.toString());
+            throw new BizException(ErrorCode.FORBIDDEN, "缺少权限：file.delete / file.other.delete");
+        }
     }
 
     // ---------- 内部工具 ----------
