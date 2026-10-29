@@ -46,6 +46,18 @@ public class PortalProperties {
     /** 账单对账上报路径（契约 §6 明确为 /api/internal/reconciliation/report）。 */
     private String reconciliationPath = "/api/internal/reconciliation/report";
 
+    /**
+     * 企业清单（docs/29）：{@code GET /api/internal/enterprises}。
+     *
+     * <p>供平台管理员在产品后台查看门户里的全部企业；**仅元数据**，
+     * 下钻成员要再调 {@link #enterpriseAccountsPath}（拆成两个接口是为了
+     * 避免"一次调用拉走全部企业的全部手机号"）。
+     */
+    private String enterprisesPath = "/api/internal/enterprises";
+
+    /** 某家企业的成员清单（docs/28 §3.1）：{@code GET /api/internal/enterprise-accounts}。 */
+    private String enterpriseAccountsPath = "/api/internal/enterprise-accounts";
+
     private int connectTimeoutMs = 3000;
 
     private int readTimeoutMs = 10000;

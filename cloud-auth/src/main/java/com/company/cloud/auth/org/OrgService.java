@@ -220,27 +220,10 @@ public class OrgService {
 
     // ── 平台管理员：企业列表 ─────────────────────────────────────
 
-    /** {@code GET /admin/enterprises}：企业列表（仅平台管理员）。 */
-    public Map<String, Object> enterprises(String status, int page, int size) {
-        requirePlatformAdmin();
-        int p = Math.max(page, 1);
-        int s = Math.min(Math.max(size, 1), 100);
-        long total = orgMapper.countEnterprises(status);
-        List<Map<String, Object>> rows = orgMapper.selectEnterprises(status, s, (p - 1) * s);
-        List<Map<String, Object>> list = new ArrayList<>(rows.size());
-        for (Map<String, Object> e : rows) {
-            Map<String, Object> m = new LinkedHashMap<>();
-            m.put("id", e.get("id"));
-            m.put("code", e.get("code"));
-            m.put("name", e.get("name"));
-            m.put("status", e.get("status"));
-            m.put("ownerUserId", e.get("owner_user_id"));
-            m.put("expireAt", e.get("expire_at"));
-            m.put("createdAt", e.get("created_at"));
-            list.add(m);
-        }
-        return Map.of("total", total, "list", list);
-    }
+    // GET /admin/enterprises 的本地查表实现已下线（2026-10-29，docs/29）：
+    // 门户的企业在我们库里没有完整数据（只有登录时补的影子企业），
+    // 改成由 cloud-portal 的 AdminEnterpriseDirectoryController 调门户的企业目录接口。
+    // 保留本方法会让人误以为这里才是企业列表的数据源。
 
     // ── 内部工具 ───────────────────────────────────────────────
 

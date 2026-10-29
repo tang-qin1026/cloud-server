@@ -70,15 +70,10 @@ public class OrgController {
         return Result.ok(orgService.members(keyword, status, deptId, page, size));
     }
 
-    @GetMapping("/admin/enterprises")
-    public Result<Map<String, Object>> enterprises(
-            Authentication authentication,
-            @RequestParam(required = false) String status,
-            @RequestParam(defaultValue = "1") int page,
-            @RequestParam(defaultValue = "20") int size) {
-        currentUser(authentication);
-        return Result.ok(orgService.enterprises(status, page, size));
-    }
+    // 注：GET /admin/enterprises 与 /admin/enterprises/{id}/accounts 已移到
+    // cloud-portal 模块（AdminEnterpriseDirectoryController，docs/29）——
+    // 它们要调门户的 /api/internal/enterprises，而 cloud-auth 不能反向依赖 cloud-portal。
+    // 旧的本地查表实现（只返回本地下表里的企业，门户的企业看不到）已下线。
 
     /** 从 SecurityContext 取当前用户（{@code JwtAuthFilter} 已注入 {@link CurrentUser}）。 */
     private CurrentUser currentUser(Authentication authentication) {
