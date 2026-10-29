@@ -75,8 +75,11 @@ public class RbacService {
     /**
      * 计算用户的有效功能权限点。
      *
-     * <p>优先级：<b>平台管理员</b>（{@code role=admin}）与<b>企业管理员</b>（{@code enterprise_role=1}）
-     * → 全部权限点；其余按多角色并集。
+     * <p>优先级：<b>平台管理员</b>（{@code role=admin}）→ 全部权限点；
+     * <b>企业管理员</b>（{@code enterprise_role=1}）→ {@link EnterpriseAdminPermissions#CODES}
+     * ∪ 角色权限；其余按多角色并集。
+     *
+     * <p>⚠️ 企业管理员**不再**等同"全量"：那会连带授予平台级权限（见该类注释）。
      *
      * <p>⚠️ 这里**只返回功能权限**。数据范围另行从 {@code users.data_scope} 取，
      * 两者是独立维度（《21-方案》§1.1）。
@@ -85,11 +88,14 @@ public class RbacService {
         if (user == null) {
             return Set.of();
         }
-        if (user.isAdmin() || user.isEnterpriseAdmin()) {
+        if (user.isAdmin()) {
             return new LinkedHashSet<>(mapper.selectAllPermCodes());
         }
-        List<String> codes = mapper.selectPermCodes(user.getId());
-        return new LinkedHashSet<>(codes);
+        LinkedHashSet<String> perms = new LinkedHashSet<>(mapper.selectPermCodes(user.getId()));
+        if (user.isEnterpriseAdmin()) {
+            perms.addAll(EnterpriseAdminPermissions.CODES);
+        }
+        return perms;
     }
 
     /** 内置模板的 code 列表（供前端"角色列表"与运维核对）。 */

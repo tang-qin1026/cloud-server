@@ -1,5 +1,7 @@
 package com.company.cloud.auth.org;
 
+import com.company.cloud.auth.rbac.EnterpriseAdminPermissions;
+
 import com.company.cloud.auth.org.mapper.OrgQueryMapper;
 import com.company.cloud.auth.org.mapper.OrgWriteMapper;
 import org.springframework.transaction.annotation.Transactional;
@@ -271,12 +273,26 @@ public class OrgService {
         return "SELF";
     }
 
-    /** 功能权限点（多角色并集；企业管理员/平台管理员 → 全量）。 */
+    /**
+     * 功能权限点。
+     *
+     * <p>平台管理员 → 全量；企业管理员 → {@link EnterpriseAdminPermissions#CODES} ∪ 角色权限；
+     * 其余 → 多角色并集。
+     *
+     * <p>⚠️ 企业管理员**不能**直接拿 {@code selectAllPermCodes()}：
+     * 那会连带授予 {@code release_sys}（发全平台版本、改系统配置、读内网密钥）、
+     * {@code admin_user}（管所有企业用户）、{@code admin_billing}（全平台台账与审批）。
+     */
     private List<String> effectivePermissions(CurrentUser cu) {
-        if (cu.isAdmin() || cu.isEnterpriseAdmin()) {
+        if (cu.isAdmin()) {
             return rbacMapper.selectAllPermCodes();
         }
-        return rbacMapper.selectPermCodes(cu.getId());
+        java.util.LinkedHashSet<String> perms =
+                new java.util.LinkedHashSet<>(rbacMapper.selectPermCodes(cu.getId()));
+        if (cu.isEnterpriseAdmin()) {
+            perms.addAll(EnterpriseAdminPermissions.CODES);
+        }
+        return new java.util.ArrayList<>(perms);
     }
 
     private static String upperScope(String raw) {
@@ -442,19 +458,21 @@ public class OrgService {
     }
 
     private void requirePerm(CurrentUser cu, String code) {
-        if (cu.isAdmin() || cu.isEnterpriseAdmin()) {
-            return;
+        if (cu.isAdmin()) {
+            return;   // 平台管理员：全平台，直接放行
         }
-        if (!rbacMapper.selectPermCodes(cu.getId()).contains(code)) {
+        // 企业管理员不再无条件放行：按默认集合 + 角色并集判定，
+        // 否则任一企业管理员都能调用平台级接口（发版本 / 改系统配置 / 管全体用户）。
+        if (!effectivePermissions(cu).contains(code)) {
             throw new BizException(ErrorCode.FORBIDDEN, "缺少权限：" + code);
         }
     }
 
     private void requireAnyPerm(CurrentUser cu, String... codes) {
-        if (cu.isAdmin() || cu.isEnterpriseAdmin()) {
+        if (cu.isAdmin()) {
             return;
         }
-        List<String> mine = rbacMapper.selectPermCodes(cu.getId());
+        List<String> mine = effectivePermissions(cu);
         for (String c : codes) {
             if (mine.contains(c)) {
                 return;
