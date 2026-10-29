@@ -90,6 +90,7 @@ public class AuthService {
             //   唯一正确链路：调门户 → 拿门户 UUID → 按 portal_user_id 查/建影子用户。
             //   影子用户的 role 恒为普通用户（PortalShadowUserCreator 里硬编码 role="user"），
             //   且门户返回的 user.role **被我们忽略**（PortalLoginUser 根本不承载它）。
+            log.info("[admin-login] local miss, falling back to portal username={}", req.getUsername());
             user = loginViaPortal(req.getUsername(), req.getPassword(), ip);
         }
 
@@ -109,9 +110,12 @@ public class AuthService {
     /**
      * 管理员登录入口（{@code POST /api/admin/login}）。
      *
-     * <p>与主登录入口的唯一区别：<b>只验本地密码，绝不回落门户、也不建任何映射</b>。
-     * 原因见改造说明 §7：管理端登录与门户解耦后，"门户里恰好有个普通用户叫 admin
-     * 从而拿到云存储管理员权限"在结构上就不可能发生。
+     * <p>与主登录入口的区别：<b>本地已存在的账号只验本地 bcrypt，绝不回落门户</b>；
+     * <b>本地不存在的账号才回落门户</b>（否则门户注册的企业管理员永远进不来管理端）。
+     *
+     * <p>这条边界守住了改造说明 §7 的要求："门户里恰好有个普通用户叫 admin"不会顶掉本地
+     * 管理员 —— 因为本地 admin 存在时，密码不匹配就直接 40101，不会走到门户。
+     * 回落创建出来的影子用户 ``role=user``，仍要过下面"企业管理员 + 企业 active"的闸门。
      *
      * <p>限流与失败锁定与主入口共用，所以本入口不会成为绕过暴力破解的旁路。
      */
@@ -128,9 +132,23 @@ public class AuthService {
                             "（" + remain + " 分钟后可再试）");
         }
 
-        // 只查本地表、只验本地 bcrypt —— 这里【没有】任何门户调用，也不会建映射
         User user = userRepository.findByUsername(req.getUsername()).orElse(null);
-        if (user == null || !passwordEncoder.matches(req.getPassword(), user.getPasswordHash())) {
+
+        if (user == null) {
+            // 门户回落（2026-10-29）：**仅在本地不存在该账号时**启用。
+            //
+            // 场景：门户注册的企业管理员只在门户有账号，本地还没有影子用户。
+            // 若本入口坚持"只认本地"，这些管理员永远登不进管理端
+            // （除非他先走一次 /auth/login 建影子用户，而产品界面并不引导这么做）。
+            //
+            // 为什么只对"本地不存在"回落、不对"密码不匹配"回落：
+            // 本地已存在的账号（尤其是 platform admin）必须始终用本地密码，
+            // 否则"门户里恰好有个同名普通用户"就能顶掉本地管理员 ——
+            // 这条边界是改造说明 §7 明确要求守住的。
+            // 回落之后仍要过下面"是否管理员"的闸门，不会凭空授权。
+            log.info("[admin-login] local miss, falling back to portal username={}", req.getUsername());
+            user = loginViaPortal(req.getUsername(), req.getPassword(), ip);
+        } else if (!passwordEncoder.matches(req.getPassword(), user.getPasswordHash())) {
             throttle.recordFailure(ip);
             auditService.loginFail(req.getUsername(), ip);
             throw new BizException(ErrorCode.LOGIN_FAILED);
