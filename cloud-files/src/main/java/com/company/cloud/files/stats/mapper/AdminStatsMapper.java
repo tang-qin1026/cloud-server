@@ -29,15 +29,25 @@ public interface AdminStatsMapper {
             @Arg(column = "remaining_bytes", javaType = long.class),
             @Arg(column = "user_count", javaType = long.class)
     })
+    /**
+     * 全平台总览。
+     *
+     * @param entId {@code null} = 全平台（平台管理员）；非 null = 只看该企业（企业管理员）
+     */
     @Select("""
+            <script>
             SELECT COALESCE(SUM(quota_bytes + extra_bytes), 0) AS total_quota_bytes,
                    COALESCE(SUM(used_bytes), 0) AS used_bytes,
                    GREATEST(COALESCE(SUM(quota_bytes + extra_bytes), 0)
                           - COALESCE(SUM(used_bytes), 0), 0) AS remaining_bytes,
                    COUNT(*) AS user_count
             FROM users
+            <where>
+              <if test="entId != null">enterprise_id = #{entId}</if>
+            </where>
+            </script>
             """)
-    AdminStatsOverview selectAdminOverview();
+    AdminStatsOverview selectAdminOverview(@Param("entId") Long entId);
 
     /** 用量 Top10 用户（并列时按 id 稳定排序） */
     @ConstructorArgs({
@@ -47,15 +57,20 @@ public interface AdminStatsMapper {
             @Arg(column = "quota_bytes", javaType = long.class)
     })
     @Select("""
+            <script>
             SELECT id          AS user_id,
                    username,
                    used_bytes,
                    quota_bytes
             FROM users
+            <where>
+              <if test="entId != null">enterprise_id = #{entId}</if>
+            </where>
             ORDER BY used_bytes DESC, id ASC
             LIMIT 10
+            </script>
             """)
-    List<TopUser> selectTopUsers();
+    List<TopUser> selectTopUsers(@Param("entId") Long entId);
 
     /**
      * 近 N 日上传 / 下载流量（audit_logs 按日聚合）。
@@ -70,6 +85,7 @@ public interface AdminStatsMapper {
             @Arg(column = "download_bytes", javaType = long.class)
     })
     @Select("""
+            <script>
             SELECT created_at::date AS day,
                    COALESCE(SUM(CASE WHEN action = 'upload'
                                      THEN (detail->>'size')::bigint END), 0) AS upload_bytes,
@@ -78,8 +94,10 @@ public interface AdminStatsMapper {
             FROM audit_logs
             WHERE action IN ('upload', 'download')
               AND created_at >= CURRENT_DATE - (#{days}::int - 1)
+              <if test="entId != null">AND enterprise_id = #{entId}</if>
             GROUP BY day
             ORDER BY day
+            </script>
             """)
-    List<TrafficPoint> selectTraffic(@Param("days") int days);
+    List<TrafficPoint> selectTraffic(@Param("days") int days, @Param("entId") Long entId);
 }

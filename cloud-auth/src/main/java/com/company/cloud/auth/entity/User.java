@@ -175,6 +175,8 @@ public class User {
         }
         return switch (dataScope) {
             case "self" -> "SELF";
+            case "dept" -> "DEPT";
+            case "dept_below" -> "DEPT_BELOW";
             case "dept_subtree" -> "DEPT_AND_BELOW";
             case "all" -> "ALL";
             default -> dataScope.toUpperCase(java.util.Locale.ROOT);

@@ -301,6 +301,8 @@ public class OrgService {
         }
         return switch (raw) {
             case "self" -> "SELF";
+            case "dept" -> "DEPT";
+            case "dept_below" -> "DEPT_BELOW";
             case "dept_subtree" -> "DEPT_AND_BELOW";
             case "all" -> "ALL";
             default -> raw.toUpperCase(java.util.Locale.ROOT);
@@ -488,9 +490,12 @@ public class OrgService {
         }
         return switch (raw.trim().toUpperCase(java.util.Locale.ROOT)) {
             case "SELF" -> "self";
+            case "DEPT" -> "dept";
+            case "DEPT_BELOW" -> "dept_below";
             case "DEPT_AND_BELOW", "DEPT_SUBTREE" -> "dept_subtree";
             case "ALL" -> "all";
-            default -> throw new BizException(ErrorCode.BAD_REQUEST, "数据范围非法：" + raw);
+            default -> throw new BizException(ErrorCode.BAD_REQUEST,
+                    "数据范围非法（可用：SELF / DEPT / DEPT_BELOW / DEPT_AND_BELOW / ALL）：" + raw);
         };
     }
     // ── 数据范围：可见的"他人" ──────────────────────────────────
@@ -516,6 +521,8 @@ public class OrgService {
         // 部门过滤被整段跳过、退化成"全企业可见"（真实踩过，已由 [4] 用例暴露）。
         String dbScope = switch (scope) {
             case "ALL" -> "all";
+            case "DEPT" -> "dept";
+            case "DEPT_BELOW" -> "dept_below";
             case "DEPT_AND_BELOW" -> "dept_subtree";
             default -> "self";
         };
@@ -524,13 +531,21 @@ public class OrgService {
             return Map.of("scope", scope, "total", 0, "list", List.of());
         }
 
+        // dept / dept_below / dept_subtree 都需要本人的部门 id 与物化路径；
+        // all 两者都不用（只看企业维度）。
         String myPath = null;
-        if ("DEPT_AND_BELOW".equals(scope)) {
+        Long myDeptId = null;
+        if (!"all".equals(dbScope)) {
             Map<String, Object> dp = orgMapper.selectUserDeptPath(cu.getId());
-            myPath = dp == null ? null : str(dp.get("path"));
+            if (dp != null) {
+                Object d = dp.get("dept_id");
+                myDeptId = d instanceof Number n ? n.longValue() : null;
+                myPath = str(dp.get("path"));
+            }
         }
 
-        List<Map<String, Object>> rows = orgMapper.selectVisibleOwners(entId, cu.getId(), dbScope, myPath);
+        List<Map<String, Object>> rows =
+                orgMapper.selectVisibleOwners(entId, cu.getId(), dbScope, myPath, myDeptId);
         List<Map<String, Object>> list = new ArrayList<>(rows.size());
         for (Map<String, Object> u : rows) {
             Map<String, Object> m = new LinkedHashMap<>();
@@ -569,13 +584,25 @@ public class OrgService {
         if ("SELF".equals(scope)) {
             return ids;
         }
-        String dbScope = "ALL".equals(scope) ? "all" : "dept_subtree";
+        String dbScope = switch (scope) {
+            case "ALL" -> "all";
+            case "DEPT" -> "dept";
+            case "DEPT_BELOW" -> "dept_below";
+            case "DEPT_AND_BELOW" -> "dept_subtree";
+            default -> "self";
+        };
         String myPath = null;
-        if ("dept_subtree".equals(dbScope)) {
+        Long myDeptId = null;
+        if (!"all".equals(dbScope)) {
             Map<String, Object> dp = orgMapper.selectUserDeptPath(cu.getId());
-            myPath = dp == null ? null : str(dp.get("path"));
+            if (dp != null) {
+                Object d = dp.get("dept_id");
+                myDeptId = d instanceof Number n ? n.longValue() : null;
+                myPath = str(dp.get("path"));
+            }
         }
-        for (Map<String, Object> u : orgMapper.selectVisibleOwners(ent, cu.getId(), dbScope, myPath)) {
+        for (Map<String, Object> u : orgMapper.selectVisibleOwners(
+                ent, cu.getId(), dbScope, myPath, myDeptId)) {
             Object id = u.get("id");
             if (id instanceof Number n) {
                 ids.add(n.longValue());

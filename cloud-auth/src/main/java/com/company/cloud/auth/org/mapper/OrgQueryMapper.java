@@ -170,14 +170,16 @@ public interface OrgQueryMapper {
     long countEnterprises(@Param("status") String status);
     // ── 数据范围：可见的"他人"列表 ──────────────────────────────
     //
-    // 这是三档数据范围（self / dept_subtree / all）在 SQL 层的**唯一权威实现**，
-    // 后续 files / audit_logs / billing 等业务查询复用同一套语义。
+    // 这是五档数据范围（self / dept / dept_below / dept_subtree / all）在 SQL 层的
+    // **唯一权威实现**，files / audit_logs 等业务查询复用同一套语义。
     //
     //   self         → 调用方直接返回空（服务层短路，不必查库）
-    //   dept_subtree → 本部门 + 所有下级部门（dept.path LIKE 前缀），天然排除兄弟与上级
+    //   dept         → 仅本部门同事（不含子部门）
+    //   dept_below   → 仅下级部门成员（**不含本部门同事**：主管看下属、不看平级）
+    //   dept_subtree → 本部门 + 所有下级部门（dept.path LIKE 前缀）
     //   all          → 本企业全部成员
     //
-    // 三档都**仍受 enterprise_id 约束**：看得到全公司，看不到别家公司。
+    // 五档都**仍受 enterprise_id 约束**：看得到全公司，看不到别家公司。
     @Select("""
             <script>
             SELECT u.id, u.username, u.nickname, u.dept_id, d.name AS dept_name
@@ -185,18 +187,39 @@ public interface OrgQueryMapper {
             LEFT JOIN dept d ON d.id = u.dept_id
             WHERE u.enterprise_id = #{entId}
               AND u.id &lt;&gt; #{meId}
-              <if test="scope == 'dept_subtree'">
-                <choose>
-                  <when test="myPath != null and myPath != ''">
-                    AND u.dept_id IN (
-                      SELECT dd.id FROM dept dd
-                      WHERE dd.enterprise_id = #{entId}
-                        AND dd.path LIKE CONCAT(#{myPath}, '%')
-                    )
-                  </when>
-                  <otherwise>AND 1 = 0</otherwise>
-                </choose>
-              </if>
+              <choose>
+                <when test="scope == 'dept'">
+                  <choose>
+                    <when test="myDeptId != null">AND u.dept_id = #{myDeptId}</when>
+                    <otherwise>AND 1 = 0</otherwise>
+                  </choose>
+                </when>
+                <when test="scope == 'dept_below'">
+                  <choose>
+                    <when test="myPath != null and myPath != ''">
+                      AND u.dept_id IN (
+                        SELECT dd.id FROM dept dd
+                        WHERE dd.enterprise_id = #{entId}
+                          AND dd.path LIKE CONCAT(#{myPath}, '%')
+                          <if test="myDeptId != null">AND dd.id &lt;&gt; #{myDeptId}</if>
+                      )
+                    </when>
+                    <otherwise>AND 1 = 0</otherwise>
+                  </choose>
+                </when>
+                <when test="scope == 'dept_subtree'">
+                  <choose>
+                    <when test="myPath != null and myPath != ''">
+                      AND u.dept_id IN (
+                        SELECT dd.id FROM dept dd
+                        WHERE dd.enterprise_id = #{entId}
+                          AND dd.path LIKE CONCAT(#{myPath}, '%')
+                      )
+                    </when>
+                    <otherwise>AND 1 = 0</otherwise>
+                  </choose>
+                </when>
+              </choose>
             ORDER BY u.dept_id NULLS LAST, u.id
             LIMIT 500
             </script>
@@ -204,7 +227,8 @@ public interface OrgQueryMapper {
     List<Map<String, Object>> selectVisibleOwners(@Param("entId") long entId,
                                                   @Param("meId") long meId,
                                                   @Param("scope") String scope,
-                                                  @Param("myPath") String myPath);
+                                                  @Param("myPath") String myPath,
+                                                  @Param("myDeptId") Long myDeptId);
 
     /** 取某用户的部门 id 与物化路径（算 dept_subtree 用）。 */
     @Select("""

@@ -11,12 +11,16 @@ import java.util.List;
  */
 public interface AdminStatsService {
 
-    /** 全平台总览（服务端缓存 1 分钟，见实现类） */
-    AdminStatsOverview overview();
+    /**
+     * 总览。
+     *
+     * @param entId {@code null} = 全平台（平台管理员）；非 null = 只看该企业（企业管理员）
+     */
+    AdminStatsOverview overview(Long entId);
 
-    /** 用量 Top10 用户 */
-    List<TopUser> topUsers();
+    /** 用量 Top10 用户；{@code entId} 语义同 {@link #overview(Long)}。 */
+    List<TopUser> topUsers(Long entId);
 
     /** 近 days 日上传/下载流量（days 收敛到 1~90，无流量的日期补零点，便于前端画曲线） */
-    List<TrafficPoint> traffic(int days);
+    List<TrafficPoint> traffic(int days, Long entId);
 }

@@ -33,10 +33,16 @@ public class AdminStatsServiceImpl implements AdminStatsService {
     private volatile long cachedOverviewAt;
 
     @Override
-    public AdminStatsOverview overview() {
+    public AdminStatsOverview overview(Long entId) {
+        // 缓存只服务"全平台"这一份：它是 3 张管理页共用的头部数据，且为全表聚合。
+        // 企业维度不缓存 —— 每家企业各一份，缓存收益低且要维护多份 TTL，
+        // 更重要的是**绝不能把全平台缓存错给企业**。
+        if (entId != null) {
+            return mapper.selectAdminOverview(entId);
+        }
         AdminStatsOverview snapshot = cachedOverview;
         if (snapshot == null || System.currentTimeMillis() - cachedOverviewAt >= OVERVIEW_TTL_MS) {
-            snapshot = mapper.selectAdminOverview();
+            snapshot = mapper.selectAdminOverview(null);
             cachedOverview = snapshot;
             cachedOverviewAt = System.currentTimeMillis();
         }
@@ -44,14 +50,14 @@ public class AdminStatsServiceImpl implements AdminStatsService {
     }
 
     @Override
-    public List<TopUser> topUsers() {
-        return mapper.selectTopUsers();
+    public List<TopUser> topUsers(Long entId) {
+        return mapper.selectTopUsers(entId);
     }
 
     @Override
-    public List<TrafficPoint> traffic(int days) {
+    public List<TrafficPoint> traffic(int days, Long entId) {
         int clamped = Math.min(Math.max(days, 1), 90);
-        List<TrafficPoint> rows = mapper.selectTraffic(clamped);
+        List<TrafficPoint> rows = mapper.selectTraffic(clamped, entId);
 
         // 无流量的日期补零点，保证曲线连续
         Map<LocalDate, TrafficPoint> byDay = new HashMap<>();
