@@ -102,7 +102,10 @@ app:
   security:
     max-login-failures: ${SECURITY_MAX_LOGIN_FAILURES:5}
     lock-minutes: ${SECURITY_LOCK_MINUTES:15}
-    rate-limit-per-minute: ${SECURITY_RATE_LIMIT_PER_MINUTE:5}
+    # 每 IP 每分钟登录尝试上限。默认 30：
+    # 失败次数另有「按账号」的独立锁定（max-login-failures / lock-minutes），
+    # 这里只做爆破总闸。设 5 会导致"连续登录几个测试账号就被限流"，联调时极易误判成密码错。
+    rate-limit-per-minute: ${SECURITY_RATE_LIMIT_PER_MINUTE:30}
   role:
     default-quota-bytes: ${DEFAULT_QUOTA_BYTES:21474836480}
   # ---- 门户接入（《云平台统一门户》产品侧）----

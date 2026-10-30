@@ -60,12 +60,16 @@ public class AuthService {
         String ip = clientIp(http);
 
         // 1. 限流：每 IP 每分钟 5 次
-        if (throttle.isRateLimited(ip)) {
-            throw new BizException(ErrorCode.LOGIN_FAILED);
+        // 频率超限与「密码错误」严格区分：此前都抛 40101，
+        // 导致「密码正确却提示用户名或密码错误」，联调时被误判成账号被改密。
+        long retryAfter = throttle.rateLimitRetryAfterSeconds(ip);
+        if (retryAfter > 0) {
+            throw new BizException(ErrorCode.LOGIN_TOO_FREQUENT,
+                    "登录过于频繁，请 " + retryAfter + " 秒后再试（同一 IP 每分钟尝试次数超限）");
         }
 
         // 2. 锁定检查
-        long remain = throttle.lockedRemainingMinutes(ip);
+        long remain = throttle.lockedRemainingMinutes(req.getUsername());
         if (remain > 0) {
             throw new BizException(ErrorCode.ACCOUNT_LOCKED,
                     ErrorCode.ACCOUNT_LOCKED.getMessage() +
@@ -101,7 +105,7 @@ public class AuthService {
         }
 
         // 5. 解锁计数
-        throttle.clearFailure(ip);
+        throttle.recordSuccess(ip, user.getUsername());   // 成功不占频率额度，并清空该账号失败计数
 
         // 6. 签发双 token（与管理员入口共用同一段签发逻辑，见 issueTokens）
         return issueTokens(user, ip);
@@ -122,10 +126,14 @@ public class AuthService {
     public LoginResponse adminLogin(LoginRequest req, HttpServletRequest http) {
         String ip = clientIp(http);
 
-        if (throttle.isRateLimited(ip)) {
-            throw new BizException(ErrorCode.LOGIN_FAILED);
+        // 频率超限与「密码错误」严格区分：此前都抛 40101，
+        // 导致「密码正确却提示用户名或密码错误」，联调时被误判成账号被改密。
+        long retryAfter = throttle.rateLimitRetryAfterSeconds(ip);
+        if (retryAfter > 0) {
+            throw new BizException(ErrorCode.LOGIN_TOO_FREQUENT,
+                    "登录过于频繁，请 " + retryAfter + " 秒后再试（同一 IP 每分钟尝试次数超限）");
         }
-        long remain = throttle.lockedRemainingMinutes(ip);
+        long remain = throttle.lockedRemainingMinutes(req.getUsername());
         if (remain > 0) {
             throw new BizException(ErrorCode.ACCOUNT_LOCKED,
                     ErrorCode.ACCOUNT_LOCKED.getMessage() +
@@ -149,9 +157,9 @@ public class AuthService {
             log.info("[admin-login] local miss, falling back to portal username={}", req.getUsername());
             user = loginViaPortal(req.getUsername(), req.getPassword(), ip);
         } else if (!passwordEncoder.matches(req.getPassword(), user.getPasswordHash())) {
-            throttle.recordFailure(ip);
+            long left = throttle.recordFailure(req.getUsername());
             auditService.loginFail(req.getUsername(), ip);
-            throw new BizException(ErrorCode.LOGIN_FAILED);
+            throw passwordError(left);
         }
         if (user.isDisabled()) {
             auditService.loginFail(user.getUsername(), ip);
@@ -164,12 +172,12 @@ public class AuthService {
         boolean platformAdmin = user.isAdmin();
         boolean enterpriseAdmin = isActiveEnterpriseAdmin(user);
         if (!platformAdmin && !enterpriseAdmin) {
-            throttle.recordFailure(ip);
+            throttle.recordFailure(req.getUsername());
             auditService.loginFail(user.getUsername(), ip);
             throw new BizException(ErrorCode.FORBIDDEN);
         }
 
-        throttle.clearFailure(ip);
+        throttle.recordSuccess(ip, user.getUsername());   // 成功不占频率额度，并清空该账号失败计数
         return issueTokens(user, ip);
     }
 
@@ -212,9 +220,9 @@ public class AuthService {
         } catch (PortalLoginException e) {
             switch (e.getReason()) {
                 case BAD_CREDENTIALS -> {
-                    throttle.recordFailure(ip);
+                    long left = throttle.recordFailure(username);
                     auditService.loginFail(username, ip);
-                    throw new BizException(ErrorCode.LOGIN_FAILED);
+                    throw passwordError(left);
                 }
                 case DISABLED -> {
                     auditService.loginFail(username, ip);
@@ -382,5 +390,19 @@ public class AuthService {
                     user.getId(), e.toString());
             return false;
         }
+    }
+    /**
+     * 密码错误提示：带出剩余尝试次数，让用户知道还剩几次（而不是干等）。
+     *
+     * <p>剩余 0 表示本次已触发锁定，直接提示锁定文案与时长。
+     */
+    private BizException passwordError(long left) {
+        if (left <= 0) {
+            return new BizException(ErrorCode.ACCOUNT_LOCKED,
+                    "失败次数过多，账号已临时锁定（" + throttle.getLockMinutes() + " 分钟后可再试）");
+        }
+        return new BizException(ErrorCode.LOGIN_FAILED,
+                "用户名或密码错误，还可尝试 " + left + " 次（超过将锁定 "
+                        + throttle.getLockMinutes() + " 分钟）");
     }
 }

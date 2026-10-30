@@ -30,6 +30,8 @@ public enum ErrorCode {
     METHOD_NOT_ALLOWED(40500, "请求方法不支持"),
     USER_NOT_FOUND(40401, "用户不存在"),
     QUOTA_TOO_LOW(42101, "配额不能低于当前已用量"),
+    /** 登录过于频繁（每 IP 每分钟次数超限）—— 与「密码错误」严格区分，别让用户以为密码被改。 */
+    LOGIN_TOO_FREQUENT(42902, "登录过于频繁，请稍后再试"),
     ACCOUNT_LOCKED(42301, "失败次数过多，账号已临时锁定"),
 
     // ---- 传输（B 组 402xx）----
