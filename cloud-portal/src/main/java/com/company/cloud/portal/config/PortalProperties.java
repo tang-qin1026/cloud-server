@@ -38,6 +38,16 @@ public class PortalProperties {
      * 此处默认值依据门户 OpenAPI（{@code GET {portal}/api/docs-json}）校准，
      * 勿凭直觉加 internal —— 曾因写成 /api/internal/wallet/deduct 导致出站调用 404。
      */
+    /**
+     * 查询用户钱包余额（docs/32）：{@code GET /api/internal/wallet/balance?portal_user_id=...}。
+     *
+     * <p>用途：付费前预检 —— 用户点"购买"之前先看余额够不够，
+     * 而不是等到扣费失败才知道。只读，不会为用户创建钱包。
+     *
+     * <p>⚠️ 是 {@code /api/internal/} 下，与扣费/退款（{@code /api/wallet/*}）不同前缀。
+     */
+    private String walletBalancePath = "/api/internal/wallet/balance";
+
     private String walletDeductPath = "/api/wallet/deduct";
 
     /** 钱包退款路径（同扣费，{@code /api/wallet/*}）。 */

@@ -131,6 +131,8 @@ app:
     login-timeout-ms: ${PORTAL_LOGIN_TIMEOUT_MS:3000}
     # 出站路径：扣费/退款在门户侧是 /api/wallet/*（不在 /api/internal/ 下），
     # 只有对账上报在 /api/internal/ 下。依据门户 OpenAPI 校准，写错会 404。
+    # 查余额（docs/32）：付费前预检；注意是 /api/internal/ 前缀，与扣费/退款不同
+    wallet-balance-path: ${PORTAL_WALLET_BALANCE_PATH:/api/internal/wallet/balance}
     wallet-deduct-path: ${PORTAL_WALLET_DEDUCT_PATH:/api/wallet/deduct}
     wallet-refund-path: ${PORTAL_WALLET_REFUND_PATH:/api/wallet/refund}
     reconciliation-path: ${PORTAL_RECONCILIATION_PATH:/api/internal/reconciliation/report}

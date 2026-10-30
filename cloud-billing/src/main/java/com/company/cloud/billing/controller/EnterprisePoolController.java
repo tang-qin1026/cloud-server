@@ -60,7 +60,7 @@ public class EnterprisePoolController {
         List<Map<String, Object>> list = admin
                 ? all
                 : all.stream()
-                        .filter(r -> String.valueOf(r.get("local_user_id")).equals(String.valueOf(cu.getId())))
+                        .filter(r -> String.valueOf(r.get("localUserId")).equals(String.valueOf(cu.getId())))
                         .toList();
         return Result.ok(Map.of("total", list.size(), "list", list));
     }

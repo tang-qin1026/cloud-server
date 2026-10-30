@@ -132,10 +132,13 @@ public class EnterprisePoolService {
     /** 某企业的成员分配清单（成员名、分配、已用）。 */
     public List<Map<String, Object>> allocations(long enterpriseId) {
         return jdbc.queryForList(
-                "SELECT id AS local_user_id, COALESCE(nickname, username) AS display_name, "
-                        + "       COALESCE(enterprise_allocated_bytes, 0) AS allocated_bytes, "
-                        + "       COALESCE(used_bytes, 0) AS used_bytes, "
-                        + "       enterprise_role "
+                // 别名统一 camelCase：与 pool / quota 两个接口保持一致，
+                // 前端不用为不同接口记两套命名风格。
+                "SELECT id AS \"localUserId\", "
+                        + "       COALESCE(nickname, username) AS \"displayName\", "
+                        + "       COALESCE(enterprise_allocated_bytes, 0) AS \"allocatedBytes\", "
+                        + "       COALESCE(used_bytes, 0) AS \"usedBytes\", "
+                        + "       enterprise_role AS \"enterpriseRole\" "
                         + "FROM users WHERE enterprise_id = ? ORDER BY id", enterpriseId);
     }
 

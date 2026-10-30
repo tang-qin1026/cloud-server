@@ -110,6 +110,61 @@ public class PortalWalletClient {
         return post(props.getReconciliationPath(), body);
     }
 
+    /**
+     * 查询用户钱包余额（docs/32）。**只读**，不会为用户创建钱包。
+     *
+     * <p>返回值里 {@code wallet_exists=false} 是正常状态（用户从未有过资金往来），
+     * 不是"用户不存在"；用户不存在门户返回 {@code 1001}。
+     *
+     * <p>签名要点：这是本类唯一的 **GET + query** 请求，
+     * {@code qs} 必须与实际 URL 里的 query **逐字一致**（字典序 + encodeURIComponent），
+     * 所以这里先用 {@link ServiceCredentialSigner#canonicalQuery} 算出规范串，
+     * 再用**同一串**拼 URL —— 分两次拼必然 1002。
+     *
+     * @param portalUserId 门户用户 UUID（不是本系统的用户 id）
+     */
+    public PortalApiResponse getBalance(String portalUserId) {
+        // 原始 query（不做排序，交由 canonicalQuery 统一规范化）
+        String rawQuery = "portal_user_id=" + portalUserId;
+        String qs = com.company.cloud.auth.portal.ServiceCredentialSigner.canonicalQuery(rawQuery);
+        String path = props.getWalletBalancePath();
+
+        String url = props.getBaseUrl() + path + "?" + qs;
+
+        String authHeader;
+        String authValue;
+        if (serviceSigner != null && serviceSigner.isReady()) {
+            authHeader = "Authorization";
+            // GET 无 body；qs 用同一份规范串
+            authValue = "Bearer " + serviceSigner.sign("GET", path, qs, null);
+        } else {
+            authHeader = "X-Internal-Key";
+            authValue = props.getInternalKey() == null ? "" : props.getInternalKey();
+            log.debug("[portal] 服务凭据未启用，回退 X-Internal-Key path={}", path);
+        }
+
+        String raw;
+        try {
+            raw = restClient.get()
+                    .uri(url)
+                    .header(authHeader, authValue)
+                    .accept(MediaType.APPLICATION_JSON)
+                    .retrieve()
+                    .body(String.class);
+        } catch (HttpClientErrorException | HttpServerErrorException e) {
+            PortalApiResponse parsed = tryParse(e.getResponseBodyAsString());
+            if (parsed != null && parsed.code() != 0) {
+                log.warn("[portal] 查余额以 HTTP {} 返回业务码 {}（{}）",
+                        e.getStatusCode(), parsed.code(), parsed.describe());
+                return parsed;
+            }
+            throw new PortalTransportException(
+                    "门户返回 HTTP " + e.getStatusCode() + "（非 {code,...} 信封）", e);
+        } catch (RestClientException e) {
+            throw new PortalTransportException("门户调用失败: " + e.getMessage(), e);
+        }
+        return parse(raw, url);
+    }
     private PortalApiResponse post(String path, Object body) {
         String url = props.getBaseUrl() + path;
 
