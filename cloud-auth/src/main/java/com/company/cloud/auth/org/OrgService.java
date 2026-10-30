@@ -335,6 +335,14 @@ public class OrgService {
         if (cu.isAdmin()) {
             return rbacMapper.selectAllPermCodes();
         }
+        // 个人域用户（enterprise_id = 0）：没有企业、没有角色，权限无从配置。
+        // 给全部**用户端**权限（文件/回收站/传输/配额 14 项），**不含任何管理端权限**。
+        //
+        // 不给的后果很严重：接口层已按权限点校验，个人用户会连自己的文件都看不了
+        // （实测 /files、/billing/quota、/uploads、/stats/overview 全部 40301）。
+        if (cu.isPersonal()) {
+            return new java.util.ArrayList<>(EnterpriseAdminPermissions.USER_SIDE_CODES);
+        }
         java.util.LinkedHashSet<String> perms =
                 new java.util.LinkedHashSet<>(rbacMapper.selectPermCodes(cu.getId()));
         if (cu.isEnterpriseAdmin()) {

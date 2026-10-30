@@ -41,6 +41,13 @@ public class PermissionChecker {
         if (cu.isAdmin()) {
             return new LinkedHashSet<>(rbacMapper.selectAllPermCodes());
         }
+        // 个人域用户（enterprise_id = 0）：没有企业、没有角色，权限无从配置。
+        // 给全部**用户端**权限（14 项），**不含任何管理端权限**。
+        // 与 OrgService.effectivePermissions 必须保持一致 —— 两处都返回给前端不同入口，
+        // 只改一处会出现"菜单能看见、接口却 40301"的割裂。
+        if (cu.isPersonal()) {
+            return new LinkedHashSet<>(EnterpriseAdminPermissions.USER_SIDE_CODES);
+        }
         LinkedHashSet<String> perms = new LinkedHashSet<>(
                 cu.getId() == null ? java.util.List.of() : rbacMapper.selectPermCodes(cu.getId()));
         if (cu.isEnterpriseAdmin()) {

@@ -62,6 +62,7 @@ public final class EnterpriseAdminPermissions {
                     "admin.dashboard.export"
             )));
 
+
     /**
      * 明确**不授予**企业管理员的权限分组（平台级）。
      *
@@ -116,4 +117,20 @@ public final class EnterpriseAdminPermissions {
     public static boolean canAssignToEmployee(String code) {
         return code != null && ASSIGNABLE_BY_ENTERPRISE_ADMIN.contains(code);
     }
+    /**
+     * **用户端**权限（使用产品本身的功能：文件 / 回收站 / 传输 / 配额，共 14 项）。
+     *
+     * <p>用途区分：
+     * <ul>
+     *   <li><b>个人域用户</b>（{@code enterprise_id = 0}）默认**全有**这 14 项 ——
+     *       他没有企业、没有角色，权限无从配置，不给他就等于产品不可用</li>
+     *   <li><b>企业成员</b>靠角色获得，授予范围就是本集合</li>
+     * </ul>
+     *
+     * <p>⚠️ 必须声明在 {@link #ASSIGNABLE_BY_ENTERPRISE_ADMIN} **之后**（本文件末尾）：
+     * 静态字段按源码顺序初始化，提前引用即使编过，运行时也可能是 {@code null}（真实踩过）。
+     *
+     * <p>注意：这 14 项**不含任何管理端权限**，个人域用户与管理端彻底隔离。
+     */
+    public static final Set<String> USER_SIDE_CODES = ASSIGNABLE_BY_ENTERPRISE_ADMIN;
 }
