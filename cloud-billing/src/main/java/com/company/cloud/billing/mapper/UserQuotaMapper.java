@@ -19,7 +19,8 @@ public interface UserQuotaMapper {
      * 读取用户免费额度 / 已用量 / 增量冗余值（billing/quota 与上传判定用）。
      */
     @Select("""
-            SELECT id, username, quota_bytes AS free_bytes, used_bytes, extra_bytes, extra_expire_at
+            SELECT id, username, quota_bytes AS free_bytes, used_bytes, extra_bytes, extra_expire_at,
+                   COALESCE(enterprise_allocated_bytes, 0) AS enterprise_allocated_bytes
             FROM users
             WHERE id = #{userId}
             """)

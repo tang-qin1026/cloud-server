@@ -11,10 +11,13 @@ public record UserQuotaView(
         Long freeBytes,
         Long usedBytes,
         Long extraBytes,
-        OffsetDateTime extraExpireAt
+        OffsetDateTime extraExpireAt,
+        Long enterpriseAllocatedBytes
 ) {
-    /** 总可用额度 = 免费额度 + 增量额度（§4.3 上传判定用） */
+    /** 总可用额度 = 免费 + 个人增量 + **企业分配**（docs/31 §6 闸 1）。 */
     public long totalAvailable() {
-        return (freeBytes == null ? 0L : freeBytes) + (extraBytes == null ? 0L : extraBytes);
+        return (freeBytes == null ? 0L : freeBytes)
+                + (extraBytes == null ? 0L : extraBytes)
+                + (enterpriseAllocatedBytes == null ? 0L : enterpriseAllocatedBytes);
     }
 }

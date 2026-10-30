@@ -63,8 +63,10 @@ public class BillingService {
         long used = quota.usedBytes() == null ? 0L : quota.usedBytes();
         long extra = quota.extraBytes() == null ? 0L : quota.extraBytes();
         long free = quota.freeBytes() == null ? 0L : quota.freeBytes();
-        boolean blocked = used > free + extra;
-        return new QuotaView(free, extra, quota.extraExpireAt(), used, blocked);
+        // docs/31：企业管理员分配给该成员的额度也算进可用空间
+        long enterprise = quota.enterpriseAllocatedBytes() == null ? 0L : quota.enterpriseAllocatedBytes();
+        boolean blocked = used > free + extra + enterprise;
+        return new QuotaView(free, extra, quota.extraExpireAt(), used, blocked, free, enterprise);
     }
 
     /**

@@ -107,7 +107,7 @@ app:
     # 这里只做爆破总闸。设 5 会导致"连续登录几个测试账号就被限流"，联调时极易误判成密码错。
     rate-limit-per-minute: ${SECURITY_RATE_LIMIT_PER_MINUTE:30}
   role:
-    default-quota-bytes: ${DEFAULT_QUOTA_BYTES:21474836480}
+    default-quota-bytes: ${DEFAULT_QUOTA_BYTES:1073741824}
   # ---- 门户接入（《云平台统一门户》产品侧）----
   # 认证侧：门户 RS256 JWT 验签（cloud-auth · PortalAuthProperties）
   portal:
@@ -120,7 +120,7 @@ app:
       connect-timeout-ms: ${PORTAL_JWKS_CONNECT_TIMEOUT_MS:3000}
       read-timeout-ms: ${PORTAL_JWKS_READ_TIMEOUT_MS:5000}
       shadow-username-prefix: ${PORTAL_SHADOW_USERNAME_PREFIX:portal_}
-      shadow-default-quota-bytes: ${PORTAL_SHADOW_DEFAULT_QUOTA_BYTES:21474836480}
+      shadow-default-quota-bytes: ${PORTAL_SHADOW_DEFAULT_QUOTA_BYTES:1073741824}
       shadow-password-hash: "${PORTAL_SHADOW_PASSWORD_HASH:!portal-shadow-no-local-login}"
     # 产品侧：门户内网接口与出账/对账（cloud-portal · PortalProperties）
     product-code: ${PORTAL_PRODUCT_CODE:storage}

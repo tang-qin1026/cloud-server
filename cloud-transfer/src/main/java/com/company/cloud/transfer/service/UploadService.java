@@ -133,6 +133,8 @@ public class UploadService {
         if (!quotaRepo.checkAvailable(userId, size)) {
             throw new BizException(ErrorCode.STORAGE_QUOTA_EXCEEDED);
         }
+        // 闸 2：本次会动用到"企业分配"那部分时，还要企业池总量够（防超卖）
+        guardEnterprisePool(userId, size);
 
         // 先落会话（拿 id），再建 MinIO multipart，最后回填 uploadId
         UploadSessionEntity s = sessionRepo.save(UploadSessionEntity.builder()
@@ -263,10 +265,13 @@ public class UploadService {
         }
 
         // 实扣配额（条件 UPDATE 原子防超卖）
+        guardEnterprisePool(userId, s.getSizeBytes());
         if (!quotaRepo.tryReserve(userId, s.getSizeBytes())) {
             try { minio.removeObject(objectKey); } catch (Exception ignored) { }
             throw new BizException(ErrorCode.STORAGE_QUOTA_EXCEEDED);
         }
+        // 企业池冗余列同步累加（5 分钟校准任务会修正偏差）
+        quotaRepo.addPoolUsed(userId, s.getSizeBytes());
 
         // 写元数据（对象为内容寻址 objects/<sha256>，引用计数归 files 表 ref_count）
         // 同级重名自动改名，避免撞 uk_files_sibling_name 唯一索引（修复上传同名文件 500 系统繁忙）
@@ -523,6 +528,29 @@ public class UploadService {
                     : 0L;
         } catch (Exception e) {
             return 0L;
+        }
+    }
+    /**
+     * 闸 2：企业池总量校验（docs/31 §6）。
+     *
+     * <p>只有当本次上传会**用到企业分配额度**时才检查：
+     * 个人剩余（免费 + 个人增量 − 已用）够则完全不涉及企业池，直接放行。
+     *
+     * <p>无企业 / 无池（返回 -1）时跳过 —— 个人用户行为与之前完全一致。
+     */
+    private void guardEnterprisePool(long userId, long size) {
+        long personalLeft = quotaRepo.personalRemaining(userId);
+        if (personalLeft >= size) {
+            return;   // 个人额度够，不碰企业池
+        }
+        long poolLeft = quotaRepo.enterprisePoolRemaining(userId);
+        if (poolLeft < 0) {
+            return;   // 不在企业内 / 无池
+        }
+        if (poolLeft < size) {
+            // 分配额度可能虚高（池缩水/分配写错），这里兜住，避免真写爆
+            throw new BizException(ErrorCode.STORAGE_QUOTA_EXCEEDED,
+                    "企业空间不足：" + (poolLeft / 1024 / 1024) + " MB（请联系管理员续费或调整分配）");
         }
     }
 }
