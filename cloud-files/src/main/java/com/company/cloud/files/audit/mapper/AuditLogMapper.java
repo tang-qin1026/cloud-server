@@ -47,4 +47,35 @@ public interface AuditLogMapper extends BaseMapper<AuditLog> {
             </script>
             """)
     List<Map<String, Object>> selectUsernames(@Param("userIds") List<Long> userIds);
+    /**
+     * 批量取「用户 id → 展示名」。nickname 优先（门户用户的 username 是 portal_<uuid>，不能直接展示）。
+     */
+    @Select("""
+            <script>
+            SELECT id, username, nickname FROM users
+             WHERE id IN
+            <foreach collection="ids" item="id" open="(" separator="," close=")">#{id}</foreach>
+            </script>
+            """)
+    List<Map<String, Object>> selectUserNames(@Param("ids") List<Long> ids);
+
+    /** 批量取文件名：mkdir / move / delete / restore / download 这类记录的 target 是节点 id。 */
+    @Select("""
+            <script>
+            SELECT id, name FROM files
+             WHERE id IN
+            <foreach collection="ids" item="id" open="(" separator="," close=")">#{id}</foreach>
+            </script>
+            """)
+    List<Map<String, Object>> selectFileNames(@Param("ids") List<Long> ids);
+
+    /** 按登录名批量取昵称：login / user_manage 这类记录的 target 直接是用户名。 */
+    @Select("""
+            <script>
+            SELECT username, nickname FROM users
+             WHERE username IN
+            <foreach collection="names" item="n" open="(" separator="," close=")">#{n}</foreach>
+            </script>
+            """)
+    List<Map<String, Object>> selectNicknamesByUsernames(@Param("names") List<String> names);
 }

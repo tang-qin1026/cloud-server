@@ -20,4 +20,19 @@ public interface EnterpriseMemberSyncPort {
      * @return 实际同步的成员条数；门户不可用时应抛出异常，由调用方决定是否降级
      */
     int syncMembers(long enterpriseId);
+
+    /**
+     * 从门户取某企业的真实 code / name。
+     *
+     * <p>为什么需要：影子企业建档时只有占位名（{@code 企业 #7}），
+     * 因为门户用户首次登录时我们只拿到 enterprise_id，没有企业名称。
+     * 结果「企业详情」里显示「企业 #7」而不是「长荣饭店」。
+     *
+     * @return 门户里的 code/name；门户不可用或查不到时返回 {@code null}
+     */
+    PortalEnterpriseProfile fetchEnterpriseProfile(long enterpriseId);
+
+    /** 门户企业的展示信息。 */
+    record PortalEnterpriseProfile(String code, String name) {
+    }
 }

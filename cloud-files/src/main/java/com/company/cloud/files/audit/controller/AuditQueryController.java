@@ -87,23 +87,107 @@ public class AuditQueryController {
         Page<AuditLog> result = auditLogMapper.selectPage(Page.of(page, size), qw);
         List<AuditLog> records = result.getRecords();
 
-        // 批量补 username：本页出现的 user_id 一次查 users，避免 N+1
-        List<Long> userIds = records.stream()
-                .map(AuditLog::getUserId)
+        // ── 把 id 翻译成名字 ──
+        // 库里只存 id，直接返回会让界面显示成一串数字。本页涉及的三类都批量查一次，避免 N+1。
+        // 既要查操作人，也要查「target 是用户 id」的记录（quota_change），合成一次批量查询
+        java.util.LinkedHashSet<Long> idsToResolve = new java.util.LinkedHashSet<>();
+        for (AuditLog l : records) {
+            if (l.getUserId() != null) {
+                idsToResolve.add(l.getUserId());
+            }
+            if (USER_ID_ACTIONS.contains(l.getAction())) {
+                Long tid = parseLong(l.getTarget());
+                if (tid != null) {
+                    idsToResolve.add(tid);
+                }
+            }
+        }
+        List<Long> userIds = new java.util.ArrayList<>(idsToResolve);
+        Map<Long, String> usernames = new java.util.HashMap<>();
+        Map<Long, String> actorNames = new java.util.HashMap<>();
+        if (!userIds.isEmpty()) {
+            for (Map<String, Object> row : auditLogMapper.selectUserNames(userIds)) {
+                long id = ((Number) row.get("id")).longValue();
+                usernames.put(id, str(row.get("username")));
+                actorNames.put(id, displayName(row.get("nickname"), row.get("username")));
+            }
+        }
+
+        // target 是节点 id 的动作（文件类）
+        List<Long> nodeIds = records.stream()
+                .filter(l -> NODE_ACTIONS.contains(l.getAction()))
+                .map(l -> parseLong(l.getTarget()))
                 .filter(java.util.Objects::nonNull)
                 .distinct()
                 .toList();
-        Map<Long, String> usernames = new java.util.HashMap<>();
-        if (!userIds.isEmpty()) {
-            for (Map<String, Object> row : auditLogMapper.selectUsernames(userIds)) {
-                usernames.put(((Number) row.get("id")).longValue(), (String) row.get("username"));
+        Map<Long, String> fileNames = new java.util.HashMap<>();
+        if (!nodeIds.isEmpty()) {
+            for (Map<String, Object> row : auditLogMapper.selectFileNames(nodeIds)) {
+                fileNames.put(((Number) row.get("id")).longValue(), str(row.get("name")));
+            }
+        }
+
+        // target 直接是用户名的动作（登录 / 用户管理）
+        List<String> targetUsernames = records.stream()
+                .filter(l -> USERNAME_ACTIONS.contains(l.getAction()))
+                .map(AuditLog::getTarget)
+                .filter(s -> s != null && !s.isBlank())
+                .distinct()
+                .toList();
+        Map<String, String> nicknameByUsername = new java.util.HashMap<>();
+        if (!targetUsernames.isEmpty()) {
+            for (Map<String, Object> row : auditLogMapper.selectNicknamesByUsernames(targetUsernames)) {
+                nicknameByUsername.put(str(row.get("username")), str(row.get("nickname")));
             }
         }
 
         List<AuditLogVO> list = records.stream()
-                .map(log -> AuditLogVO.from(log, usernames.get(log.getUserId())))
+                .map(log -> AuditLogVO.from(
+                        log,
+                        usernames.get(log.getUserId()),
+                        actorDisplay(log, actorNames),
+                        resolveTargetName(log, fileNames, actorNames, nicknameByUsername)))
                 .toList();
         return Result.ok(PageResult.of(result.getTotal(), list));
+    }
+
+    /** target 是文件节点 id 的动作。 */
+    private static final java.util.Set<String> NODE_ACTIONS = java.util.Set.of(
+            "mkdir", "move", "rename", "delete", "delete_force", "restore", "download", "upload", "complete");
+
+    /** target 直接是用户名的动作。 */
+    private static final java.util.Set<String> USERNAME_ACTIONS = java.util.Set.of("login", "login_fail", "user_manage");
+
+    /**
+     * 目标展示名。
+     *
+     * <p>target 的语义随 action 变化：文件类是节点 id，登录类是用户名，配额类（quota_change）是用户 id。
+     * 按 action 分派；解析不到就返回 null（VO 会回退成原始 target，不会显示成空白）。
+     */
+    private static String resolveTargetName(AuditLog log,
+                                            Map<Long, String> fileNames,
+                                            Map<Long, String> userNames,
+                                            Map<String, String> nicknameByUsername) {
+        String action = log.getAction() == null ? "" : log.getAction();
+        String target = log.getTarget();
+        if (target == null || target.isBlank()) {
+            return null;
+        }
+        if (USERNAME_ACTIONS.contains(action)) {
+            String nick = nicknameByUsername.get(target);
+            return nick != null && !nick.isBlank() ? nick : target;
+        }
+        Long id = parseLong(target);
+        if (id == null) {
+            return null;
+        }
+        if (NODE_ACTIONS.contains(action)) {
+            return fileNames.get(id);
+        }
+        if ("quota_change".equals(action)) {
+            return userNames.get(id);
+        }
+        return null;
     }
 
     /** 当前用户：从 SecurityContext 取（A 组 JwtAuthFilter 注入 CurrentUser），与 B 组 UploadController 一致。 */
@@ -124,5 +208,38 @@ public class AuditQueryController {
         } catch (Exception e) {
             return null;
         }
+    }
+    private static String str(Object o) {
+        return o == null ? null : String.valueOf(o);
+    }
+
+    /** 展示名：nickname 优先，回退 username。 */
+    private static String displayName(Object nickname, Object username) {
+        String n = str(nickname);
+        return n != null && !n.isBlank() ? n : str(username);
+    }
+
+    private static Long parseLong(String s) {
+        try {
+            return Long.parseLong(s.trim());
+        } catch (Exception e) {
+            return null;
+        }
+    }
+    /** target 是用户 id 的动作（配额调整）。 */
+    private static final java.util.Set<String> USER_ID_ACTIONS = java.util.Set.of("quota_change");
+
+    /**
+     * 操作人展示名。
+     *
+     * <p>{@code user_id} 为空说明是**未登录**事件（登录失败、账号不存在），
+     * 此时明确显示「(未登录)」，不要让界面出现空白让人以为数据丢了。
+     */
+    private static String actorDisplay(AuditLog log, Map<Long, String> actorNames) {
+        if (log.getUserId() == null) {
+            return "(未登录)";
+        }
+        String n = actorNames.get(log.getUserId());
+        return n != null && !n.isBlank() ? n : "(已删除用户 " + log.getUserId() + ")";
     }
 }

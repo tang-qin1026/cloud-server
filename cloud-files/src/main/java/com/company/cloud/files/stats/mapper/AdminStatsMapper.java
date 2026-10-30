@@ -54,14 +54,16 @@ public interface AdminStatsMapper {
             @Arg(column = "user_id", javaType = long.class),
             @Arg(column = "username", javaType = String.class),
             @Arg(column = "used_bytes", javaType = long.class),
-            @Arg(column = "quota_bytes", javaType = long.class)
+            @Arg(column = "quota_bytes", javaType = long.class),
+            @Arg(column = "nickname", javaType = String.class)
     })
     @Select("""
             <script>
             SELECT id          AS user_id,
                    username,
                    used_bytes,
-                   quota_bytes
+                   quota_bytes,
+                   nickname
             FROM users
             <where>
               <if test="entId != null">enterprise_id = #{entId}</if>

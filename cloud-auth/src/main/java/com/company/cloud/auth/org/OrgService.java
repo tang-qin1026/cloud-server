@@ -71,6 +71,11 @@ public class OrgService {
         Map<String, Object> enterprise = null;
         if (entId != null && entId != 0L) {
             Map<String, Object> e = orgMapper.selectEnterpriseById(entId);
+            // 影子企业建档时只有占位名「企业 #7」，这里补成门户里的真实名字。
+            // 只在名字仍是占位形态时才去问门户，正常情况零开销。
+            if (e != null && isPlaceholderEnterpriseName(str(e.get("name")))) {
+                e = refreshEnterpriseNameFromPortal(entId, e);
+            }
             if (e != null) {
                 // ⚠️ 不能用 Map.of：expireAt / rejectReason 等列**允许为 NULL**，
                 // Map.of 遇到 null 值会抛 NPE，表现为接口 50000（真实踩过）。
@@ -990,5 +995,36 @@ public class OrgService {
             out.add(m);
         }
         return out;
+    }
+    /** 影子企业占位名：{@code 企业 #7}。 */
+    private static boolean isPlaceholderEnterpriseName(String name) {
+        return name != null && name.matches("^企业 #\\d+$");
+    }
+
+    /**
+     * 从门户取真实企业名并写回本地，返回更新后的行。
+     *
+     * <p>失败不阻断：拿不到门户信息时返回原行（界面显示占位名，但不报错）。
+     */
+    private Map<String, Object> refreshEnterpriseNameFromPortal(Long entId, Map<String, Object> current) {
+        var port = memberSyncPort == null ? null : memberSyncPort.getIfAvailable();
+        if (port == null) {
+            return current;
+        }
+        try {
+            var profile = port.fetchEnterpriseProfile(entId);
+            if (profile == null || profile.name() == null || profile.name().isBlank()) {
+                return current;
+            }
+            orgWriteMapper.updateEnterpriseProfile(entId, profile.code(), profile.name());
+            log.info("[org] 影子企业补真实名称 entId={} name={}", entId, profile.name());
+            Map<String, Object> updated = new LinkedHashMap<>(current);
+            updated.put("code", profile.code());
+            updated.put("name", profile.name());
+            return updated;
+        } catch (Exception ex) {
+            log.warn("[org] 补企业名称失败，保留占位名 entId={} err={}", entId, ex.toString());
+            return current;
+        }
     }
 }

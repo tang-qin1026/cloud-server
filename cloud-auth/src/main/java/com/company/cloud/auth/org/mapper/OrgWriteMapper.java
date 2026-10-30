@@ -263,4 +263,9 @@ public interface OrgWriteMapper {
                                @Param("code") String code,
                                @Param("name") String name,
                                @Param("ownerUserId") Long ownerUserId);
+    /** 用门户的真实企业名/编码覆盖影子企业的占位值（不动 owner / status）。 */
+    @Update("UPDATE enterprise SET code = #{code}, name = #{name}, updated_at = now() WHERE id = #{id}")
+    int updateEnterpriseProfile(@Param("id") long id,
+                                @Param("code") String code,
+                                @Param("name") String name);
 }

@@ -78,4 +78,38 @@ public class PortalEnterpriseMemberAdapter implements EnterpriseMemberSyncPort {
         JsonNode v = node.get(field);
         return v == null || v.isNull() ? null : v.asText();
     }
+    /**
+     * 取门户企业的真实 code / name。
+     *
+     * <p>用「列企业」接口 + 按 id 过滤：门户没有「按 id 查单个企业」的内网接口，
+     * 企业总数是几十的量级，拉一页即可。
+     */
+    @Override
+    public PortalEnterpriseProfile fetchEnterpriseProfile(long enterpriseId) {
+        PortalApiResponse r = directoryClient.listEnterprises(null, null, PAGE_LIMIT, 0);
+        if (!r.success() || r.data() == null) {
+            log.warn("[enterprise-profile] 拉企业目录失败 enterpriseId={} code={}",
+                    enterpriseId, r.code());
+            return null;
+        }
+        JsonNode list = r.data().get("list");
+        if (list == null || !list.isArray()) {
+            return null;
+        }
+        String want = String.valueOf(enterpriseId);
+        for (JsonNode e : list) {
+            JsonNode idNode = e.get("enterprise_id");
+            if (idNode != null && want.equals(idNode.asText())) {
+                String code = text(e, "code");
+                String name = text(e, "name");
+                if (name == null || name.isBlank()) {
+                    return null;
+                }
+                log.info("[enterprise-profile] 取到门户企业 enterpriseId={} code={} name={}",
+                        enterpriseId, code, name);
+                return new PortalEnterpriseProfile(code, name);
+            }
+        }
+        return null;
+    }
 }
