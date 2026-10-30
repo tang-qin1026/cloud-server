@@ -61,6 +61,21 @@ public class PortalJwtAuthFilter extends OncePerRequestFilter {
         try {
             PortalJwtVerifier.PortalToken token =
                     verifier.verify(header.substring(BEARER.length()));
+
+            // ── ut / ent 一致性（门户契约硬要求，fail-closed）──────────────────
+            // ut=1 表示"企业用户"，必须同时带 ent（企业 id）。
+            // 若放行，影子用户会建成 enterprise_id=0（个人域），
+            // 结果企业用户的数据全部落进个人域 —— 既是越权也是数据串号。
+            //
+            // 注意：**不能**"退化成个人域"处理。宁可拒绝本次请求（Security 返回 40103）。
+            if (token.userType() != null && token.userType() == 1
+                    && (token.enterpriseId() == null || token.enterpriseId() <= 0L)) {
+                log.warn("[portal] 拒绝认证：ut=1 但缺 ent（企业用户必须带企业归属）portalUserId={} uname={}",
+                        token.portalUserId(), token.username());
+                chain.doFilter(request, response);
+                return;
+            }
+
             CurrentUser currentUser = shadowUserService.resolveOrCreate(
                     token.portalUserId(), token.username(),
                     token.userType(), token.enterpriseId(), token.enterpriseRole());

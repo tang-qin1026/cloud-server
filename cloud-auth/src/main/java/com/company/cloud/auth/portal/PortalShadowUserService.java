@@ -88,6 +88,14 @@ public class PortalShadowUserService {
     @jakarta.transaction.Transactional
     public CurrentUser resolveOrCreate(String portalUserId, String uname,
                                        Integer userType, Long enterpriseId, Integer enterpriseRole) {
+        // 门户契约：ut=1（企业用户）必须带 ent。缺了就拒绝，**不能退化成个人域**。
+        // 过滤器层已挡一次；这里再挡一次，因为成员同步等路径也会调到本方法，
+        // 安全约束不能只靠调用方守规矩。
+        if (userType != null && userType == 1 && (enterpriseId == null || enterpriseId <= 0L)) {
+            throw new com.company.cloud.common.result.BizException(
+                    com.company.cloud.common.result.ErrorCode.UNAUTHORIZED,
+                    "企业用户的门户令牌缺少企业归属（ut=1 但无 ent），已拒绝");
+        }
         CurrentUser base = resolveOrCreate(portalUserId, uname);
         if (enterpriseId == null && enterpriseRole == null) {
             return base;
