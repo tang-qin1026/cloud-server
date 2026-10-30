@@ -31,6 +31,13 @@ public class BillingService {
 
     private final BillingConfigMapper configMapper;
     private final IncreaseRequestMapper requestMapper;
+    /**
+     * 企业池（docs/31）。用来在 quota 视图里带出「企业是否超额停用」。
+     * 可选注入：单模块启动（无企业池表）时不影响其余计费功能。
+     */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.company.cloud.auth.enterprise.EnterprisePoolService enterprisePoolService;
+
     private final UserQuotaMapper userQuotaMapper;
     private final AuditService auditService;
 
@@ -66,7 +73,11 @@ public class BillingService {
         // docs/31：企业管理员分配给该成员的额度也算进可用空间
         long enterprise = quota.enterpriseAllocatedBytes() == null ? 0L : quota.enterpriseAllocatedBytes();
         boolean blocked = used > free + extra + enterprise;
-        return new QuotaView(free, extra, quota.extraExpireAt(), used, blocked, free, enterprise);
+        // 企业超额停用（可分配额度为负）——前端据此置灰上传/下载/预览
+        boolean suspended = enterprisePoolService != null && cu.getEnterpriseId() != null
+                && cu.getEnterpriseId() > 0L
+                && enterprisePoolService.suspendedForOversell(cu.getEnterpriseId());
+        return new QuotaView(free, extra, quota.extraExpireAt(), used, blocked, free, enterprise, suspended);
     }
 
     /**

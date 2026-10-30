@@ -57,7 +57,9 @@ public class EnterprisePoolService {
             out.put("allocatedBytes", 0L);
             out.put("usedBytes", 0L);
             out.put("availableBytes", 0L);
+            out.put("availableBytesRaw", 0L);
             out.put("overAllocated", false);
+            out.put("suspended", false);
             out.put("nextExpireAt", null);
             return out;
         }
@@ -69,9 +71,13 @@ public class EnterprisePoolService {
         out.put("totalBytes", total);
         out.put("allocatedBytes", allocated);
         out.put("usedBytes", used);
-        // 还能再分多少：池里没有分配出去的部分（不小于 0）
+        // 还能再分多少。为负 = 超额（池缩水但分配没收回来）。
         out.put("availableBytes", Math.max(0L, total - allocated));
+        // 原始值（可能为负）：前端据此置灰「上传/下载/预览」，并显示差额
+        out.put("availableBytesRaw", total - allocated);
         out.put("overAllocated", Boolean.TRUE.equals(r.get("over_allocated")));
+        // 超额即停用用户端的这三个动作（平台级限制，凌驾于角色权限之上）
+        out.put("suspended", (total - allocated) < 0);
         out.put("nextExpireAt", nextExpireAt(enterpriseId));
         return out;
     }
@@ -194,30 +200,134 @@ public class EnterprisePoolService {
     }
 
     /**
-     * 推进一档状态：active → grace（到期）、grace → reclaimed（宽限结束）。
+     * 到期回收：{@code active → reclaimed}，**没有宽限期**，到点直接扣减池总量。
      *
-     * @return 本轮的变更条数
+     * <h3>为什么取消宽限期（2026-10-30 口径变更）</h3>
+     * 原设计是「到期 → 7 天宽限（可读可下载、禁上传）→ 回收」。
+     * 现改为**到期即回收**：企业空间是预付制，过期就该停；
+     * 宽限期会让"欠费还能读"变成长期状态，也和「可分配额度为负即停用」这条新规则冲突。
+     *
+     * <p>回收后若 {@code allocated > total}（可分配额度为负数 = 超卖），
+     * 该企业**所有账号不能登录用户端**（企业管理员仍可进管理端把分配降下来）——
+     * 这个判定在登录侧做，见 {@code AuthService}。
+     *
+     * <p>幂等：{@code reclaimed_deducted} 标记，任务重跑/并发都不会重复扣。
+     *
+     * @return 本轮回收条数
      */
     public int advanceStates(OffsetDateTime now) {
-        int toGrace = jdbc.update(
-                "UPDATE enterprise_pool_grant SET status = 'grace' "
-                        + "WHERE status = 'active' AND expire_at <= ?", Timestamp.from(now.toInstant()));
+        // 兼容历史数据：仍在 grace 且已过期的，一并按"到期"处理
         int reclaimed = jdbc.update(
                 "UPDATE enterprise_pool_grant SET status = 'reclaimed', "
                         + "  reclaimed_deducted = TRUE, reclaimed_at = ? "
-                        + "WHERE status = 'grace' AND grace_end_at <= ? AND reclaimed_deducted = FALSE",
+                        + "WHERE status IN ('active', 'grace') AND expire_at <= ? "
+                        + "  AND reclaimed_deducted = FALSE",
                 Timestamp.from(now.toInstant()), Timestamp.from(now.toInstant()));
-        if (toGrace > 0 || reclaimed > 0) {
-            log.info("[pool] 到期推进 now={} 转宽限={} 回收={}", now, toGrace, reclaimed);
-            // 受影响的企业重算汇总（reclaimed 会让 total 变小 → 可能转为超卖）
+        if (reclaimed > 0) {
+            log.info("[pool] 到期直接回收 now={} 回收={} 笔（无宽限期）", now, reclaimed);
             List<Long> ents = jdbc.queryForList(
                     "SELECT DISTINCT enterprise_id FROM enterprise_pool_grant "
-                            + "WHERE status IN ('grace','reclaimed')", Long.class);
+                            + "WHERE status = 'reclaimed'", Long.class);
             for (Long e : ents) {
                 recompute(e);
             }
         }
-        return toGrace + reclaimed;
+        return reclaimed;
+    }
+
+    // ── 套餐清单 / 续费 ───────────────────────────────────────
+
+    /**
+     * 每一笔套餐（含已回收的，标出状态）。
+     *
+     * <p>JOIN 商品目录拿 sku 名称与单价 —— 管理员看清单时要能对上"这是哪个套餐、多少钱"。
+     * 商品信息经 {@code portal_provision} 反查（grant 表只存 order_item_id，不冗余 sku）。
+     */
+    public List<Map<String, Object>> subscriptions(long enterpriseId) {
+        return jdbc.queryForList(
+                "SELECT g.order_item_id AS \"orderItemId\", "
+                        + "       g.granted_bytes AS \"grantedBytes\", "
+                        + "       g.status AS \"status\", "
+                        + "       g.expire_at AS \"expireAt\", "
+                        + "       g.reclaimed_at AS \"reclaimedAt\", "
+                        + "       COALESCE(pp.sku_id, '') AS \"skuId\", "
+                        + "       p.name AS \"skuName\", "
+                        + "       p.price_cents AS \"priceCents\", "
+                        + "       p.quota_gb AS \"quotaGb\" "
+                        + "FROM enterprise_pool_grant g "
+                        + "LEFT JOIN portal_provision pp ON pp.order_item_id = g.order_item_id "
+                        + "LEFT JOIN portal_product_sku p ON p.sku_id = pp.sku_id "
+                        + "WHERE g.enterprise_id = ? "
+                        + "ORDER BY g.expire_at DESC, g.id DESC", enterpriseId);
+    }
+
+    /**
+     * 续费某笔套餐：查出当初买的 SKU 与单价，**新下一单**（空间是预付制，续费 = 再买一期）。
+     *
+     * <p>本方法只负责算出「要买什么」，实际下单由 controller 走 docs/30 的服务端下单
+     * （下单需要门户客户端，在 cloud-portal，而本服务在 cloud-auth）。
+     *
+     * @return skuId / skuName / quotaGb / priceCents / clientOrderKey
+     */
+    public Map<String, Object> renew(long enterpriseId, long orderItemId) {
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "SELECT g.order_item_id, g.status, pp.sku_id, p.name, p.quota_gb, p.price_cents "
+                        + "FROM enterprise_pool_grant g "
+                        + "LEFT JOIN portal_provision pp ON pp.order_item_id = g.order_item_id "
+                        + "LEFT JOIN portal_product_sku p ON p.sku_id = pp.sku_id "
+                        + "WHERE g.enterprise_id = ? AND g.order_item_id = ?", enterpriseId, orderItemId);
+        if (rows.isEmpty()) {
+            throw new IllegalArgumentException("找不到该套餐：" + orderItemId);
+        }
+        Map<String, Object> r = rows.get(0);
+        Object sku = r.get("sku_id");
+        if (sku == null || String.valueOf(sku).isBlank()) {
+            throw new IllegalArgumentException("该套餐查不到对应的商品，无法续费（请直接购买新套餐）");
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("orderItemId", orderItemId);
+        out.put("skuId", String.valueOf(sku));
+        out.put("skuName", r.get("name"));
+        out.put("quotaGb", r.get("quota_gb"));
+        out.put("priceCents", r.get("price_cents"));
+        out.put("clientOrderKey", renewClientOrderKey(enterpriseId, orderItemId));
+        out.put("previousStatus", r.get("status"));
+        return out;
+    }
+
+    /**
+     * 续费幂等键：{@code ent-<企业>-<订单项>-<yyyyMMdd>}。
+     *
+     * <p>同一天对同一笔重复点击只成功一次（门户按 clientOrderKey 幂等），
+     * 避免手抖连点扣两次钱；换天再点视为新的一期，是合理的。
+     */
+    public static String renewClientOrderKey(long enterpriseId, long orderItemId) {
+        return "ent-" + enterpriseId + "-" + orderItemId + "-"
+                + java.time.LocalDate.now().format(java.time.format.DateTimeFormatter.BASIC_ISO_DATE);
+    }
+    // ── 可用额度 / 超卖 ───────────────────────────────────────
+
+    /**
+     * 企业当前「可分配额度」= {@code totalBytes − allocatedBytes}。
+     *
+     * <p>为负 = 可分配的比已分配的少（超卖）：说明池子缩水了（到期回收），
+     * 但分给成员的额度还没收回。
+     */
+    public long availableBytes(long enterpriseId) {
+        Map<String, Object> p = pool(enterpriseId);
+        return (Long) p.get("totalBytes") - (Long) p.get("allocatedBytes");
+    }
+
+    /**
+     * 该企业是否因超额而**停用用户端**。
+     *
+     * <p>规则（2026-10-30）：可分配额度为负 → 该企业所有账号不能登录用户端；
+     * 企业管理员仍可进管理端把分配降下来，恢复正常后自动解禁。
+     *
+     * <p>只看企业；个人域用户（{@code enterprise_id = 0}）永远返回 false。
+     */
+    public boolean suspendedForOversell(long enterpriseId) {
+        return enterpriseId > 0 && availableBytes(enterpriseId) < 0;
     }
 
     /** 全部企业重算（定时校准，修正冗余列漂移）。 */

@@ -42,6 +42,15 @@ public class AuthService {
     @org.springframework.beans.factory.annotation.Autowired
     private com.company.cloud.auth.tenant.mapper.EnterpriseStatusMapper enterpriseStatusMapper;
 
+    /**
+     * 企业池（docs/31）。用于「可分配额度为负 → 停用用户端」这条闸门。
+     *
+     * <p>只在**用户端登录**（{@code /auth/login}）里判定；管理端登录（{@code /admin/login}）
+     * 不受影响 —— 否则管理员进不去，就没法把分配降下来恢复正常。
+     */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.company.cloud.auth.enterprise.EnterprisePoolService enterprisePoolService;
+
     private final UserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
     private final JwtService jwtService;
@@ -103,6 +112,10 @@ public class AuthService {
             auditService.loginFail(user.getUsername(), ip);
             throw new BizException(ErrorCode.ACCOUNT_DISABLED);
         }
+        // 注：企业超额（可分配额度为负）**不再拦登录**。
+        // 2026-10-30 口径改为：只关闭「上传 / 下载 / 预览」三个动作，
+        // 见 UploadService 的 oversell 闸门。理由：拦登录会把"看现有文件"一起禁掉，
+        // 而列表/元数据读取本来是安全且必要的。
 
         // 5. 解锁计数
         throttle.recordSuccess(ip, user.getUsername());   // 成功不占频率额度，并清空该账号失败计数
@@ -352,7 +365,27 @@ public class AuthService {
         } else {
             m.put("scope", null);
         }
-                return m;
+        // ── 企业超额提示（2026-10-30）──────────────────────────────
+        // 可分配额度为负时，企业成员的「上传 / 下载 / 预览」被平台关闭。
+        // 登录时就把原因带出来，前端可直接弹一次提示，不用等用户点了才 40301。
+        //
+        // 注意：这里**不拦登录** —— 只是告知「部分核心功能无法使用」，
+        // 列表与元数据仍可正常查看。
+        boolean suspended = isEnterpriseSuspended(user);
+        m.put("enterpriseSuspended", suspended);
+        m.put("enterpriseNotice", suspended
+                ? "企业可分配额度为负，部分核心功能无法使用"
+                : null);
+        return m;
+    }
+
+    /** 该用户所属企业是否超额（可分配额度为负）。个人域/无池一律 false。 */
+    private boolean isEnterpriseSuspended(User user) {
+        if (enterprisePoolService == null) {
+            return false;
+        }
+        Long entId = user.getEnterpriseId();
+        return entId != null && entId > 0L && enterprisePoolService.suspendedForOversell(entId);
     }
 
     private String clientIp(HttpServletRequest req) {

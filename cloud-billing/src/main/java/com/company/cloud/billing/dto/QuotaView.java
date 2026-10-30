@@ -26,12 +26,26 @@ public record QuotaView(
         /** 个人免费额度（与 freeBytes 同值，语义更清晰的新名字）。 */
         long personalBytes,
         /** 管理员分给该成员的企业额度。 */
-        long enterpriseBytes
+        long enterpriseBytes,
+        /**
+         * 企业是否**超额停用**（可分配额度为负）。
+         *
+         * <p>为 true 时该企业所有账号的上传/下载/预览都被平台拦住 ——
+         * 前端应把这三个按钮置灰，并提示联系管理员。**与角色权限无关**，管理员勾了也拦。
+         */
+        boolean enterpriseSuspended
 ) {
     /** 兼容旧构造器（调用方不用一次性全改）。 */
     public QuotaView(long freeBytes, long extraBytes, OffsetDateTime extraExpireAt,
                      long usedBytes, boolean uploadBlocked) {
-        this(freeBytes, extraBytes, extraExpireAt, usedBytes, uploadBlocked, freeBytes, 0L);
+        this(freeBytes, extraBytes, extraExpireAt, usedBytes, uploadBlocked, freeBytes, 0L, false);
+    }
+
+    /** 兼容上一个版本（无 suspended 参数）。 */
+    public QuotaView(long freeBytes, long extraBytes, OffsetDateTime extraExpireAt,
+                     long usedBytes, boolean uploadBlocked, long personalBytes, long enterpriseBytes) {
+        this(freeBytes, extraBytes, extraExpireAt, usedBytes, uploadBlocked,
+                personalBytes, enterpriseBytes, false);
     }
 
     /** 总可用额度。 */

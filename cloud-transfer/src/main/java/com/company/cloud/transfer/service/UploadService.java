@@ -322,6 +322,12 @@ public class UploadService {
 
     // ============ R-B07：下载签发 ============
     public String presignDownload(Long userId, Long fileId, boolean inline) {
+        // 企业超额停用：下载与预览一并关闭（inline=true 就是预览）
+        if (quotaRepo.enterpriseOversold(userId)) {
+            throw new BizException(ErrorCode.FORBIDDEN,
+                    "企业空间已超额（可分配额度为负），请联系企业管理员处理；"
+                            + "当前无法上传、下载、预览文件");
+        }
         FileEntity f = fileRepo.findById(fileId)
                 .orElseThrow(() -> new BizException(ErrorCode.FILE_NOT_FOUND));
         if (!f.getOwnerId().equals(userId) || f.getDeletedAt() != null) {
@@ -539,11 +545,20 @@ public class UploadService {
      * <p>无企业 / 无池（返回 -1）时跳过 —— 个人用户行为与之前完全一致。
      */
     private void guardEnterprisePool(long userId, long size) {
-        // docs/31 §7.1：企业套餐到期后进入宽限期 —— **可读可下载，禁止上传**。
-        // 否则"欠费了还能继续灌数据"，续费后池依然不够，等于把风险推给未来。
+        // ── 企业超额停用（2026-10-30 口径）──────────────────────────────
+        // 可分配额度为负（池缩水但分配没收回来）时，关闭「上传 / 下载 / 预览」。
+        // 这是**平台级**限制，凌驾于企业管理员分配的权限之上 —— 管理员勾了也照样拦。
+        // 只关这三个动作，不拦登录与列表读取。
+        if (quotaRepo.enterpriseOversold(userId)) {
+            throw new BizException(ErrorCode.FORBIDDEN,
+                    "企业空间已超额（可分配额度为负），请联系企业管理员处理；"
+                            + "当前无法上传、下载、预览文件");
+        }
+        // 企业套餐到期后：可读可下载，**禁止上传**（2026-10-30 口径：无宽限期，到期即回收）。
+        // 判定放在上传口而不是只靠登录口 —— 已登录的会话也要拦住。
         if (quotaRepo.enterpriseInGraceOnly(userId)) {
             throw new BizException(ErrorCode.STORAGE_QUOTA_EXCEEDED,
-                    "企业套餐已到期（宽限期内只读），续费后可继续上传");
+                    "企业套餐已到期，续费后可继续上传（现有文件仍可查看与下载）");
         }
         long personalLeft = quotaRepo.personalRemaining(userId);
         if (personalLeft >= size) {

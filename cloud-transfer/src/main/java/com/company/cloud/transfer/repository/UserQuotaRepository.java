@@ -153,4 +153,29 @@ public class UserQuotaRepository {
             return false;   // 个人域用户：不适用
         }
     }
+    /**
+     * 该用户所属企业是否**超额停用**（可分配额度为负）。
+     *
+     * <p>口径（2026-10-30）：{@code total_bytes − allocated_bytes < 0} 时，
+     * 该企业**所有账号**关闭「上传 / 下载 / 预览」三个动作 —— 这是**平台级**限制，
+     * 凌驾于企业管理员分配的权限之上：管理员给成员勾了这些权限也照样被拦。
+     *
+     * <p>只关这三个动作，不拦登录、不拦列表与元数据读取 ——
+     * 用户仍能看到自己有哪些文件，管理员仍能进管理端把分配降下来恢复。
+     *
+     * @return true = 超额停用（应拒绝上传/下载/预览）
+     */
+    public boolean enterpriseOversold(long userId) {
+        try {
+            Integer v = (Integer) em.createNativeQuery(
+                            "SELECT CASE WHEN (p.total_bytes - p.allocated_bytes) < 0 THEN 1 ELSE 0 END "
+                                    + "FROM users u JOIN enterprise_pool p ON p.enterprise_id = u.enterprise_id "
+                                    + "WHERE u.id = :id AND u.enterprise_id > 0")
+                    .setParameter("id", userId)
+                    .getSingleResult();
+            return v != null && v == 1;
+        } catch (NoResultException e) {
+            return false;   // 个人域 / 没有池记录：不适用
+        }
+    }
 }

@@ -10,6 +10,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -52,6 +53,37 @@ public class EnterprisePoolController {
         return Result.ok(poolService.pool(cu.getEnterpriseId()));
     }
 
+    /**
+     * 每一笔套餐（企业买过什么、什么时候到期、还剩多少）。
+     *
+     * <p>企业管理员据此看「我买了哪些套餐、哪笔快到期了、要不要续费」。
+     * 按到期时间倒序（最近的在前）。
+     */
+    @GetMapping("/subscriptions")
+    public Result<Map<String, Object>> subscriptions(Authentication authentication) {
+        CurrentUser cu = requireEnterpriseUser(authentication);
+        permissionChecker.require(cu, "org.member.read");
+        List<Map<String, Object>> rows = poolService.subscriptions(cu.getEnterpriseId());
+        return Result.ok(Map.of("total", rows.size(), "list", rows));
+    }
+
+    /**
+     * 续费某笔套餐 —— 本质是**新下一单**（空间是预付制，续费 = 再买一期）。
+     *
+     * <p>走服务端下单（docs/30）：我方用产品服务凭据 + 下单人的 portal_user_id 调门户，
+     * 扣**企业管理员自己的钱包**，门户回调 provision 后产生新的一笔 grant。
+     *
+     * <p><b>幂等</b>：{@code clientOrderKey} 由本接口生成，
+     * 同一天对同一笔套餐重复点击只会成功一次（键 = {@code ent-<id>-<orderItemId>-<yyyyMMdd>}），
+     * 避免手抖连点两次扣两笔钱。
+     */
+    @PostMapping("/subscriptions/{orderItemId}/renew")
+    public Result<Map<String, Object>> renew(Authentication authentication,
+                                             @PathVariable long orderItemId) {
+        CurrentUser cu = requireEnterpriseUser(authentication);
+        permissionChecker.require(cu, "org.member.manage");
+        return Result.ok(poolService.renew(cu.getEnterpriseId(), orderItemId));
+    }
     @GetMapping("/allocations")
     public Result<Map<String, Object>> allocations(Authentication authentication) {
         CurrentUser cu = requireEnterpriseUser(authentication);

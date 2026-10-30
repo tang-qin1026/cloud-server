@@ -51,6 +51,16 @@ public class OrgService {
     @org.springframework.beans.factory.annotation.Autowired
     private org.springframework.beans.factory.ObjectProvider<
             com.company.cloud.auth.portal.EnterpriseMemberSyncPort> memberSyncPort;
+
+    /**
+     * 企业池（用于「可分配额度为负」提示）。
+     *
+     * <p>用 {@link ObjectProvider} 而不是直接注入：池服务与 AuthService 互相引用，
+     * 直接构造注入容易形成循环依赖；Provider 是延迟取 Bean，天然断开这个环。
+     */
+    @org.springframework.beans.factory.annotation.Autowired
+    private org.springframework.beans.factory.ObjectProvider<
+            com.company.cloud.auth.enterprise.EnterprisePoolService> enterprisePoolProvider;
     private final com.company.cloud.auth.rbac.RbacService rbacService;
 
     // ── 当前用户上下文 ───────────────────────────────────────────
@@ -92,6 +102,14 @@ public class OrgService {
         me.put("enterpriseId", entId);
         me.put("isEnterpriseAdmin", cu.isEnterpriseAdmin());
         me.put("isPlatformAdmin", cu.isAdmin() && !cu.isEnterpriseAdmin());
+
+        // 企业超额提示：可分配额度为负 → 上传/下载/预览被关闭。
+        // 登录响应里也带了一份，这里再带一次是为了「刷新页面/直接进内部页」也能提示到。
+        boolean suspended = isEnterpriseSuspended(entId);
+        me.put("enterpriseSuspended", suspended);
+        me.put("enterpriseNotice", suspended
+                ? "企业可分配额度为负，部分核心功能无法使用"
+                : null);
 
         // 部门与档位
         List<Map<String, Object>> roles = rolesOf(cu);
@@ -1034,5 +1052,14 @@ public class OrgService {
             log.warn("[org] 补企业名称失败，保留占位名 entId={} err={}", entId, ex.toString());
             return current;
         }
+    }
+    /** 企业是否超额（可分配额度为负）。无池/个人域/端口未就绪一律 false。 */
+    private boolean isEnterpriseSuspended(Long entId) {
+        if (entId == null || entId <= 0L) {
+            return false;
+        }
+        // 池服务在 cloud-auth 内，可直接取 Bean；用 ObjectProvider 避免循环依赖风险
+        var pool = enterprisePoolProvider == null ? null : enterprisePoolProvider.getIfAvailable();
+        return pool != null && pool.suspendedForOversell(entId);
     }
 }
