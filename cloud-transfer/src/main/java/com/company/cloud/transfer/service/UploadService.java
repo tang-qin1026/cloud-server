@@ -539,6 +539,12 @@ public class UploadService {
      * <p>无企业 / 无池（返回 -1）时跳过 —— 个人用户行为与之前完全一致。
      */
     private void guardEnterprisePool(long userId, long size) {
+        // docs/31 §7.1：企业套餐到期后进入宽限期 —— **可读可下载，禁止上传**。
+        // 否则"欠费了还能继续灌数据"，续费后池依然不够，等于把风险推给未来。
+        if (quotaRepo.enterpriseInGraceOnly(userId)) {
+            throw new BizException(ErrorCode.STORAGE_QUOTA_EXCEEDED,
+                    "企业套餐已到期（宽限期内只读），续费后可继续上传");
+        }
         long personalLeft = quotaRepo.personalRemaining(userId);
         if (personalLeft >= size) {
             return;   // 个人额度够，不碰企业池

@@ -124,4 +124,33 @@ public class UserQuotaRepository {
                 .setParameter("id", userId)
                 .executeUpdate();
     }
+    /**
+     * 该用户所属企业是否**已进入宽限期**（docs/31 §7.1：到期后 7 天内只读）。
+     *
+     * <p>判定：企业**有**购买记录，但**没有任何一笔**仍在 {@code active}。
+     * 换句话说"全部套餐都到期了"。
+     *
+     * <p>为什么不是"存在任意 grace 就禁"：企业可能同时有多笔（月中加购），
+     * 只要还有一笔有效，空间就是有效的，不该因为另一笔到期就禁上传。
+     *
+     * @return true = 宽限期内（禁止上传，可读可下载）
+     */
+    public boolean enterpriseInGraceOnly(long userId) {
+        try {
+            Integer v = (Integer) em.createNativeQuery(
+                            "SELECT CASE "
+                                    + "  WHEN NOT EXISTS (SELECT 1 FROM enterprise_pool_grant g "
+                                    + "                     WHERE g.enterprise_id = u.enterprise_id) THEN 0 "
+                                    + "  WHEN EXISTS (SELECT 1 FROM enterprise_pool_grant g "
+                                    + "                WHERE g.enterprise_id = u.enterprise_id "
+                                    + "                  AND g.status = 'active') THEN 0 "
+                                    + "  ELSE 1 END "
+                                    + "FROM users u WHERE u.id = :id AND u.enterprise_id > 0")
+                    .setParameter("id", userId)
+                    .getSingleResult();
+            return v != null && v == 1;
+        } catch (NoResultException e) {
+            return false;   // 个人域用户：不适用
+        }
+    }
 }
