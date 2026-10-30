@@ -182,9 +182,21 @@ public class AuditQueryController {
             return null;
         }
         if (NODE_ACTIONS.contains(action)) {
-            return fileNames.get(id);
+            String name = fileNames.get(id);
+            // 文件已被彻底删除时查不到名字，给个可读前缀，别直接甩数字
+            return name != null && !name.isBlank() ? name : "文件 #" + id;
         }
-        if ("quota_change".equals(action)) {
+        if (USER_ID_ACTIONS.contains(action)) {
+            return userNames.get(id);
+        }
+        // 计费配置 / 增额申请：库里只有配置 id 与申请 id，给个可读前缀，别直接甩数字
+        if ("billing_config".equals(action)) {
+            return "计费配置 #" + id;
+        }
+        if ("billing_request".equals(action)) {
+            return "增额申请 #" + id;
+        }
+        if ("user_manage".equals(action)) {
             return userNames.get(id);
         }
         return null;
