@@ -49,8 +49,16 @@ public class PortalSubscriptionExpireTask {
             try {
                 // 条件更新：只有把 grace 改成 expired 的这一次才回收配额
                 if (provisionMapper.markExpired(p.getId()) > 0) {
-                    if (p.getGrantedBytes() != null && p.getGrantedBytes() > 0) {
+                    // ⚠️ 企业购买的空间进了**企业池**，从来没加到下单人的 quota_bytes。
+                    // 若这里照样 reclaimQuota，会误扣那个人的个人额度（凭空少掉一块空间）。
+                    // 企业池的额度回收由 EnterprisePoolExpireTask 负责（enterprise_pool_grant）。
+                    boolean enterprisePurchase = p.getEnterpriseId() != null && p.getEnterpriseId() > 0L;
+                    if (!enterprisePurchase && p.getGrantedBytes() != null && p.getGrantedBytes() > 0) {
                         provisionMapper.reclaimQuota(p.getLocalUserId(), p.getGrantedBytes());
+                    }
+                    if (enterprisePurchase) {
+                        log.info("[portal] 企业购买到期，额度由企业池任务回收 orderItemId={} enterpriseId={}",
+                                p.getOrderItemId(), p.getEnterpriseId());
                     }
                     stopped++;
                     log.info("[portal] 订阅停机 orderItemId={} localUserId={} 回收配额 {} 字节",

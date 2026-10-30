@@ -38,6 +38,11 @@ public record ProvisionRequest(
                 example = "30")
         @JsonProperty("period_days") Integer periodDays,
 
+        @Schema(description = "**企业池归属（docs/31）**：下单人属于 active 企业且是 owner/企业管理员时由门户带上。"
+                        + "带了 → 授予进**企业池**（不再加到下单人个人额度）；为空 → 个人额度（现有行为不变）",
+                example = "7", nullable = true)
+        @JsonProperty("enterprise_id") Long enterpriseId,
+
         @Schema(description = "门户透传的附加信息，**任意结构**，本侧原样落库到 `portal_provision.extra`",
                 example = "{\"渠道\": \"小程序\", \"orderNo\": \"A-1\"}", nullable = true)
         @JsonProperty("extra") JsonNode extra) {

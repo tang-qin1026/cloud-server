@@ -79,6 +79,23 @@ public class PortalShadowUserService {
     public CurrentUser resolveForProvision(String portalUserId) {
         return resolveOrCreate(portalUserId, null);
     }
+
+    /**
+     * provision 专用：返回**带企业字段**的本地用户。
+     *
+     * <p>{@link #resolveForProvision} 只带 id/username/role（够建实例用），
+     * 但入企业池需要判断"下单人是否企业管理员/owner"，
+     * 所以这里把 {@code enterprise_id} / {@code enterprise_role} 一起读出来。
+     */
+    public CurrentUser resolveForProvisionWithTenant(String portalUserId) {
+        CurrentUser base = resolveForProvision(portalUserId);
+        return userRepository.findById(base.getId())
+                .map(u -> new CurrentUser(u.getId(), u.getUsername(), u.getRole(),
+                        u.isPersonal() ? 0 : 1,
+                        u.getEnterpriseId(),
+                        u.getEnterpriseRole() == null ? 0 : u.getEnterpriseRole().intValue()))
+                .orElse(base);
+    }
     /**
      * 门户令牌带租户信息时的解析：除影子用户外，还把 {@code ut / ent / er}
      * **投影**到本地 {@code users}（企业归属的权威在门户，产品侧只做投影）。

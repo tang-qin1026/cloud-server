@@ -1,4 +1,4 @@
-package com.company.cloud.billing.service;
+package com.company.cloud.auth.enterprise;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -13,6 +13,12 @@ import java.util.Map;
 
 /**
  * 企业池额度：入池、分配、到期回收（docs/31）。
+ *
+ * <p><b>为什么放在 cloud-auth 而不是 cloud-billing</b>：
+ * 入池发生在 <b>cloud-portal</b> 的 provision 回调里，而 cloud-portal 只依赖
+ * cloud-common + cloud-auth（不依赖 cloud-billing）。把池逻辑放在 cloud-auth，
+ * 让 provision（cloud-portal）、管理接口与到期任务（cloud-billing）共用同一份实现，
+ * 避免在两个模块里各写一套 SQL 然后慢慢漂移。
  *
  * <h3>为什么按笔记账</h3>
  * 包月套餐月中加购，两笔到期时间不同。单 {@code expire_at} 列必然出错

@@ -1,6 +1,6 @@
 package com.company.cloud.billing.scheduler;
 
-import com.company.cloud.billing.service.EnterprisePoolService;
+import com.company.cloud.auth.enterprise.EnterprisePoolService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;

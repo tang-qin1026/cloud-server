@@ -26,6 +26,13 @@ public class PortalProvision {
     @TableId(type = IdType.AUTO)
     private Long id;
 
+    /**
+     * 企业池归属（docs/31）：非空表示这笔开通进企业池，不再加到个人额度。
+     *
+     * <p>空 = 个人购买（原有行为）。
+     */
+    private Long enterpriseId;
+
     /** 门户订单项 id；幂等键，唯一索引 uk_portal_provision_order_item。 */
     private Long orderItemId;
 

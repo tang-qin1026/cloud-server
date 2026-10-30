@@ -64,7 +64,16 @@ public class PortalProvisionService {
      * 取 720 是为了保持改单位前「缺省 30 天」的语义——门户万一漏传周期，用户拿到的仍是 30 天。
      */
     private static final int DEFAULT_PERIOD_HOURS = 720;
+    /** 企业池宽限期（天）：到期后仍可读/可下载，禁止上传。docs/31 §7.1 */
+    private static final int POOL_GRACE_DAYS = 7;
 
+    /**
+     * 企业池（docs/31）。放在 cloud-auth，供本模块与 cloud-billing 共用同一份实现。
+     */
+    private final com.company.cloud.auth.enterprise.EnterprisePoolService enterprisePoolService;
+    /** 本地推断企业归属用：企业状态与 owner。 */
+    private final com.company.cloud.auth.tenant.mapper.EnterpriseStatusMapper enterpriseStatusMapper;
+    private final com.company.cloud.auth.org.mapper.OrgWriteMapper orgWriteMapper;
     private final PortalProvisionMapper provisionMapper;
     private final PortalProductSkuMapper skuMapper;
     private final PortalShadowUserService shadowUserService;
@@ -112,7 +121,7 @@ public class PortalProvisionService {
             }
 
             // ── 4. 影子用户（门户用户首次到达业务侧时建档）────────────────
-            CurrentUser localUser = shadowUserService.resolveForProvision(req.portalUserId());
+            CurrentUser localUser = shadowUserService.resolveForProvisionWithTenant(req.portalUserId());
 
             long grantedBytes = computeGrantedBytes(sku, quantity);
 
@@ -135,6 +144,8 @@ public class PortalProvisionService {
             // ── 5. 先落库（铁律 2）：唯一索引兜底并发 ─────────────────────
             PortalProvision record = new PortalProvision();
             record.setOrderItemId(req.orderItemId());
+            // 记录这笔开通进池还是进个人（对账/排障时一眼能看出）
+            record.setEnterpriseId(resolvePurchaseEnterpriseId(req, localUser));
             record.setPortalUserId(req.portalUserId());
             record.setLocalUserId(localUser.getId());
             record.setSkuId(req.skuId());
@@ -168,15 +179,31 @@ public class PortalProvisionService {
             }
             ownsGranting = true;
 
-            // ── 7. 建实例：授予配额（users.quota_bytes += granted_bytes）────
-            if (grantedBytes > 0) {
-                provisionMapper.grantQuota(localUser.getId(), grantedBytes);
-            }
-
             String instanceId = "st-" + String.format("%06d", record.getId());
             // 到期时间按**小时**推进（V2024 起）：720 小时 = 30 天，3 小时 = 3 小时。
             // 注意宽限期（grace）仍是「天」，不在这里，见 PortalProvisionMapper.markDueAsGrace。
             OffsetDateTime expireAt = OffsetDateTime.now().plusHours(periodHours);
+
+            // ── 7. 授予：进企业池 还是 进个人额度 ────────────────────────
+            //
+            // docs/31：企业购买的空间进**企业池**，由管理员分配给成员，
+            // 不再堆到"下单那一个人"头上（否则成员用不了、管理员也分不了）。
+            //
+            // 判定依据是请求里的 enterprise_id（门户保证：只有 owner/企业管理员
+            // 且企业 active 时才带）。为空 = 个人购买，行为与之前完全一致。
+            Long purchaseEnterpriseId = resolvePurchaseEnterpriseId(req, localUser);
+            if (grantedBytes > 0) {
+                if (purchaseEnterpriseId != null) {
+                    enterprisePoolService.grant(purchaseEnterpriseId, req.orderItemId(),
+                            grantedBytes, expireAt, POOL_GRACE_DAYS);
+                    log.info("[portal] 企业池入池 enterpriseId={} orderItemId={} bytes={} expireAt={}"
+                                    + "（来源={}）",
+                            purchaseEnterpriseId, req.orderItemId(), grantedBytes, expireAt,
+                            req.enterpriseId() != null ? "门户下发" : "本地推断");
+                } else {
+                    provisionMapper.grantQuota(localUser.getId(), grantedBytes);
+                }
+            }
 
             // ── 8. 收敛为 active ─────────────────────────────────────────
             if (provisionMapper.finalizeActive(req.orderItemId(), instanceId, expireAt) == 0) {
@@ -249,5 +276,51 @@ public class PortalProvisionService {
                 log.warn("[portal] 标记开通失败状态异常 orderItemId={} err={}", req.orderItemId(), ex.toString());
             }
         }
+    }
+    /**
+     * 判定这笔购买该进**企业池**还是**个人额度**（docs/31 §8）。
+     *
+     * <p>规则：下单人属于 **active 企业** 且 是 **owner / 企业管理员** → 企业池；否则个人。
+     *
+     * <p><b>两种来源</b>：
+     * <ol>
+     *   <li>门户在请求里下发 {@code enterprise_id} → 直接采信（门户是权威，
+     *       它才知道下单时的实时归属）</li>
+     *   <li>门户没下发 → **本地推断**（企业归属、role、owner、企业状态我们本地都有投影）。
+     *       这样即便门户还没升级到带这个字段，企业购买也能正确进池，
+     *       不会堆到下单人个人额度上。</li>
+     * </ol>
+     *
+     * <p>为什么不只等门户：企业购买若进了个人额度，成员完全用不了，
+     * 管理员也分不了 —— 等于功能不可用。能自己判就先自己判。
+     */
+    private Long resolvePurchaseEnterpriseId(ProvisionRequest req, CurrentUser localUser) {
+        if (req.enterpriseId() != null && req.enterpriseId() > 0L) {
+            return req.enterpriseId();
+        }
+        if (localUser == null) {
+            return null;
+        }
+        Integer er = localUser.getEnterpriseRole();
+        Long entId = localUser.getEnterpriseId();
+        boolean enterpriseAdmin = er != null && er == 1;
+        if (entId == null || entId <= 0L) {
+            return null;
+        }
+        if (!enterpriseAdmin) {
+            // 不是企业管理员：再看是不是 owner（owner 也可能 er=0）
+            Long ownerId = orgWriteMapper.selectEnterpriseOwner(entId);
+            if (ownerId == null || !ownerId.equals(localUser.getId())) {
+                return null;   // 普通成员自购 → 个人额度
+            }
+        }
+        // 企业必须 active，否则不往池里灌（停用/驳回企业不给扩容）
+        String status = enterpriseStatusMapper.selectStatus(entId);
+        if (!"active".equals(status)) {
+            log.info("[portal] 企业不可用(status={})，本笔按个人额度处理 sellEnterpriseId={}",
+                    status, entId);
+            return null;
+        }
+        return entId;
     }
 }
