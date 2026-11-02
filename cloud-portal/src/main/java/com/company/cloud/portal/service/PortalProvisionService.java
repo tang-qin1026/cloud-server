@@ -14,6 +14,7 @@ import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 
 import java.time.OffsetDateTime;
+import java.util.Map;
 
 /**
  * 门户开通（契约 §3.2）。
@@ -75,6 +76,8 @@ public class PortalProvisionService {
     private final com.company.cloud.auth.tenant.mapper.EnterpriseStatusMapper enterpriseStatusMapper;
     private final com.company.cloud.auth.org.mapper.OrgWriteMapper orgWriteMapper;
     private final PortalProvisionMapper provisionMapper;
+    /** 企业池（续费识别用）。 */
+    private final com.company.cloud.auth.enterprise.EnterprisePoolService poolService;
     private final PortalProductSkuMapper skuMapper;
     private final PortalShadowUserService shadowUserService;
 
@@ -122,6 +125,51 @@ public class PortalProvisionService {
 
             // ── 4. 影子用户（门户用户首次到达业务侧时建档）────────────────
             CurrentUser localUser = shadowUserService.resolveForProvisionWithTenant(req.portalUserId());
+
+            // ── 4a. 续费识别（2026-11-02）─────────────────────────────────
+            // 续费是"给原有那笔延长一个周期"，门户扣款后仍会回调本接口送一笔**新 order_item**。
+            // 若不拦，容量会被重复加一次（用户看到"续费了但份额也翻倍"）。
+            // 命中 subscription_renewal 则：不发放额度，只记一条 granted_bytes=0 的开通记录用于对账，
+            // 并把它与门户 order_item 关联。
+            Long purchaseEntIdEarly = resolvePurchaseEnterpriseId(req, localUser);
+            if (purchaseEntIdEarly != null && purchaseEntIdEarly > 0L) {
+                Map<String, Object> renewal = poolService.consumeRenewalIfAny(
+                        purchaseEntIdEarly, req.skuId(), quantity);
+                if (renewal != null) {
+                    long renewalId = ((Number) renewal.get("id")).longValue();
+                    long extendsHours = ((Number) renewal.get("extend_hours")).longValue();
+                    log.info("[portal] provision 命中续费单 orderItemId={} 企业={} 原开通={} 已延长 {} 小时，本次不发放额度",
+                            req.orderItemId(), purchaseEntIdEarly,
+                            renewal.get("grant_order_item_id"), extendsHours);
+                    poolService.bindRenewalToOrderItem(renewalId, req.orderItemId());
+
+                    PortalProvision record = new PortalProvision();
+                    record.setOrderItemId(req.orderItemId());
+                    record.setEnterpriseId(purchaseEntIdEarly);
+                    record.setPortalUserId(req.portalUserId());
+                    record.setLocalUserId(localUser.getId());
+                    record.setSkuId(req.skuId());
+                    record.setQuantity(quantity);
+                    record.setPeriodHours((int) extendsHours);
+                    record.setGrantedBytes(0L);        // 续费不新增容量
+                    record.setStatus(STATUS_ACTIVE);
+                    record.setQuotaReclaimed(false);
+                    record.setInstanceId("rnw-" + renewal.get("grant_order_item_id"));
+                    record.setExpireAt(((java.sql.Timestamp) renewal.get("expire_at_after")).toInstant()
+                            .atOffset(java.time.ZoneOffset.ofHours(8)));
+                    record.setExtra("{\"renewalOf\":" + renewal.get("grant_order_item_id") + "}");
+                    try {
+                        provisionMapper.insert(record);
+                    } catch (DuplicateKeyException e) {
+                        PortalProvision first = provisionMapper.selectByOrderItemId(req.orderItemId());
+                        if (first != null) {
+                            return first;
+                        }
+                        throw PortalApiException.internalError("续费记录冲突，请重试");
+                    }
+                    return record;
+                }
+            }
 
             long grantedBytes = computeGrantedBytes(sku, quantity);
 

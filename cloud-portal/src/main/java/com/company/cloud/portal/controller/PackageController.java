@@ -5,6 +5,10 @@ import com.company.cloud.auth.security.CurrentUser;
 import com.company.cloud.common.result.BizException;
 import com.company.cloud.common.result.ErrorCode;
 import com.company.cloud.common.result.Result;
+import com.company.cloud.auth.entity.PortalUserMap;
+import com.company.cloud.auth.repository.PortalUserMapRepository;
+import com.company.cloud.portal.client.PortalApiResponse;
+import com.company.cloud.portal.client.PortalOrderClient;
 import com.company.cloud.portal.entity.PortalProductSku;
 import com.company.cloud.portal.mapper.PortalProductSkuMapper;
 import lombok.RequiredArgsConstructor;
@@ -52,7 +56,11 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class PackageController {
 
+    private final com.company.cloud.portal.config.PortalProperties props;
     private final PortalProductSkuMapper skuMapper;
+    private final PortalOrderClient orderClient;
+    private final PortalUserMapRepository portalUserMapRepository;
+    private final com.company.cloud.auth.enterprise.EnterprisePoolService poolService;
     private final UserRepository userRepository;
     private final com.company.cloud.auth.org.mapper.OrgWriteMapper orgWriteMapper;
 
@@ -147,5 +155,81 @@ public class PackageController {
             return cu;
         }
         throw new BizException(ErrorCode.TOKEN_INVALID);
+    }
+    /**
+     * 续费某笔套餐 —— **延长原有开通一个周期，不新增容量**。
+     *
+     * <h3>与"新买"的区别（2026-11-02 口径）</h3>
+     * <ul>
+     *   <li>新买（{@code POST /orders}）→ 新增一笔 grant，容量累加</li>
+     *   <li><b>本接口 → 只把该笔的到期时间往后推一个周期（默认 30 天），容量不变</b></li>
+     * </ul>
+     *
+     * <h3>一次请求做三步</h3>
+     * <ol>
+     *   <li>校验：这笔开通属于本企业、未回收（已回收的不给续，否则等于白送空间）</li>
+     *   <li>付钱：服务端调门户下单扣款（幂等键由本侧生成，同日重复点击只成功一次）</li>
+     *   <li>延长：扣款成功后把 grant + provision 的 expire_at 各推一个周期，并落续费记录</li>
+     * </ol>
+     *
+     * <p>门户随后会回调 {@code /internal/provision} 送一笔新 order_item —— 我方按
+     * {@code subscription_renewal} 记录识别出这是续费单并跳过发放，容量不会被重复叠加。
+     */
+    @org.springframework.web.bind.annotation.PostMapping("/subscriptions/{orderItemId}/renew")
+    public Result<Map<String, Object>> renew(Authentication authentication,
+                                             @org.springframework.web.bind.annotation.PathVariable long orderItemId) {
+        CurrentUser cu = currentUser(authentication);
+        Long entId = cu.getEnterpriseId();
+        if (entId == null || entId <= 0L) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "该接口只在企业内可用（个人域没有套餐开通记录）");
+        }
+        // 续费=花钱，只允许企业管理员（普通成员只能看，与套餐页口径一致）
+        if (!canPurchase(cu)) {
+            throw new BizException(ErrorCode.FORBIDDEN,
+                    "企业成员只能查看套餐，如需续费请联系企业管理员");
+        }
+        String portalUserId = portalUserMapRepository.findByLocalUserId(cu.getId())
+                .map(PortalUserMap::getPortalUserId)
+                .orElseThrow(() -> new BizException(ErrorCode.BAD_REQUEST,
+                        "当前账号未关联门户用户，无法续费（请用门户账号登录后重试）"));
+
+        // 先查出这笔的 skuId/数量/单周期，用来自动下单
+        Map<String, Object> one = poolService.subscriptions(entId).stream()
+                .filter(r -> String.valueOf(orderItemId).equals(String.valueOf(r.get("orderItemId"))))
+                .findFirst()
+                .orElseThrow(() -> new BizException(ErrorCode.BAD_REQUEST, "找不到该套餐：" + orderItemId));
+        if (Boolean.TRUE.equals(one.get("expired")) && "reclaimed".equals(String.valueOf(one.get("status")))) {
+            throw new BizException(ErrorCode.BAD_REQUEST,
+                    "该套餐已到期回收，无法续费；请直接购买新套餐");
+        }
+        String skuId = String.valueOf(one.get("skuId"));
+        int quantity = ((Number) one.get("quantity")).intValue();
+        if (skuId.isBlank()) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "该套餐查不到对应的商品，无法续费");
+        }
+
+        String key = "rnw-" + entId + "-" + orderItemId + "-"
+                + java.time.LocalDate.now().format(java.time.format.DateTimeFormatter.BASIC_ISO_DATE);
+        List<Map<String, Object>> items = new ArrayList<>();
+        items.add(Map.of("product_code", props.getProductCode(), "sku_id", skuId, "quantity", quantity));
+
+        PortalApiResponse resp = orderClient.createOrder(portalUserId, key, items, null);
+        // success()：code=0 正常，code=3003 幂等重复（语义等价于成功，本次没扣款）
+        if (!resp.success()) {
+            throw new BizException(ErrorCode.BAD_REQUEST,
+                    "门户下单失败（code=" + resp.code() + "）：" + resp.message());
+        }
+        String portalOrderId = resp.data() == null ? null : resp.data().path("order_id").asText(null);
+        long priceCents = ((Number) one.get("totalPriceCents")).longValue();
+
+        Map<String, Object> out = poolService.applyRenewal(entId, orderItemId, key, portalOrderId, priceCents);
+        out.put("portalOrderId", portalOrderId);
+        out.put("priceCents", priceCents);
+        out.put("priceYuan", BigDecimal.valueOf(priceCents).movePointLeft(2).toPlainString());
+        out.put("pool", poolService.pool(entId));
+        log.info("[renew] 企业 {} 续费 orderItem={} sku={} x{} 到期 {} → {} 门户单={}",
+                entId, orderItemId, skuId, quantity,
+                out.get("expireAtBefore"), out.get("expireAtAfter"), portalOrderId);
+        return Result.ok(out);
     }
 }

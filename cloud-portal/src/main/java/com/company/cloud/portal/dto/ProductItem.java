@@ -38,6 +38,12 @@ public record ProductItem(
                 example = "720")
         @JsonProperty("period_hours") Integer periodHours,
 
+        @Schema(description = "周期**天**数。门户《商品字段提供清单》v1.1 要求 `billing_mode=1` 时**必须提供**"
+                        + "（包月填 30）；`billing_mode=2` 留空。"
+                        + "与 `period_hours` 同时给出时门户以 `period_hours` 为准，此字段用于兼容旧校验。",
+                example = "30")
+        @JsonProperty("period_days") Integer periodDays,
+
         @Schema(description = "库存。`null` 表示不限库存或未上报（前端显示「现货」）；云存储即不限库存",
                 example = "null", nullable = true)
         @JsonProperty("stock") Integer stock) {

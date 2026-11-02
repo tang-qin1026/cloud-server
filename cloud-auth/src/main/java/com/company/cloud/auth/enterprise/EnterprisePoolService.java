@@ -244,16 +244,36 @@ public class EnterprisePoolService {
      * 商品信息经 {@code portal_provision} 反查（grant 表只存 order_item_id，不冗余 sku）。
      */
     public List<Map<String, Object>> subscriptions(long enterpriseId) {
+        // 字段说明（2026-11-02 修正：原来只给 quota_gb + granted_bytes，
+        // quantity>1 时前端会算成"份额对不上"）：
+        //   quantity     数量（下单买了几份）
+        //   unitQuotaGb  单份容量
+        //   totalQuotaGb quantity × 单份容量  ← 与 grantedBytes 对应
+        //   priceCents   单份价格（分）
+        //   totalPriceCents quantity × 单份价格  ← 这一笔总共花了多少
+        //   renewals     该笔被续费过几次（续费只延长时间，不加容量，见 subscription_renewal）
         return jdbc.queryForList(
                 "SELECT g.order_item_id AS \"orderItemId\", "
+                        + "       g.enterprise_id AS \"enterpriseId\", "
+                        + "       COALESCE(pp.sku_id, '') AS \"skuId\", "
+                        + "       p.name AS \"skuName\", "
+                        + "       COALESCE(pp.quantity, 1) AS \"quantity\", "
+                        + "       p.quota_gb AS \"unitQuotaGb\", "
+                        + "       (COALESCE(p.quota_gb, 0) * COALESCE(pp.quantity, 1)) AS \"totalQuotaGb\", "
                         + "       g.granted_bytes AS \"grantedBytes\", "
+                        + "       p.price_cents AS \"priceCents\", "
+                        + "       (COALESCE(p.price_cents, 0) * COALESCE(pp.quantity, 1)) AS \"totalPriceCents\", "
+                        + "       COALESCE(pp.period_hours, 720) AS \"periodHours\", "
+                        + "       COALESCE(pp.period_hours, 720) / 24 AS \"periodDays\", "
+                        + "       pp.created_at AS \"createdAt\", "
                         + "       g.status AS \"status\", "
                         + "       g.expire_at AS \"expireAt\", "
                         + "       g.reclaimed_at AS \"reclaimedAt\", "
-                        + "       COALESCE(pp.sku_id, '') AS \"skuId\", "
-                        + "       p.name AS \"skuName\", "
-                        + "       p.price_cents AS \"priceCents\", "
-                        + "       p.quota_gb AS \"quotaGb\" "
+                        + "       GREATEST(0, EXTRACT(DAY FROM (g.expire_at - now())))::int AS \"daysRemaining\", "
+                        + "       (g.status = 'reclaimed' OR g.expire_at <= now()) AS \"expired\", "
+                        + "       COALESCE((SELECT count(*) FROM subscription_renewal r "
+                        + "                  WHERE r.grant_order_item_id = g.order_item_id "
+                        + "                    AND r.status IN ('applied','consumed')), 0) AS \"renewals\" "
                         + "FROM enterprise_pool_grant g "
                         + "LEFT JOIN portal_provision pp ON pp.order_item_id = g.order_item_id "
                         + "LEFT JOIN portal_product_sku p ON p.sku_id = pp.sku_id "
@@ -262,39 +282,114 @@ public class EnterprisePoolService {
     }
 
     /**
-     * 续费某笔套餐：查出当初买的 SKU 与单价，**新下一单**（空间是预付制，续费 = 再买一期）。
+     * 续费某笔开通：**只把到期时间往后推一个周期，容量不变**。
      *
-     * <p>本方法只负责算出「要买什么」，实际下单由 controller 走 docs/30 的服务端下单
-     * （下单需要门户客户端，在 cloud-portal，而本服务在 cloud-auth）。
+     * <p>与"新买"的区别（2026-11-02 口径）：
+     * <ul>
+     *   <li>新买 → 新增一笔 {@code enterprise_pool_grant}，容量累加</li>
+     *   <li><b>续费 → 延长原有那笔的 expire_at，不新增 grant、不重复加容量</b></li>
+     * </ul>
      *
-     * @return skuId / skuName / quotaGb / priceCents / clientOrderKey
+     * <h3>为什么要落 subscription_renewal</h3>
+     * 续费同样要付钱：调用方先在门户下单，门户扣款后会回调 {@code /internal/provision}
+     * 送一笔**新的 order_item**。我们靠本表识别"这次回调其实是续费单"，
+     * 从而跳过发放（否则容量会被重复加一次）。
+     *
+     * @return 延长前后的到期时间，供接口回给前端
      */
-    public Map<String, Object> renew(long enterpriseId, long orderItemId) {
+    public Map<String, Object> applyRenewal(long enterpriseId, long orderItemId,
+                                            String clientOrderKey, String portalOrderId,
+                                            long priceCents) {
         List<Map<String, Object>> rows = jdbc.queryForList(
-                "SELECT g.order_item_id, g.status, pp.sku_id, p.name, p.quota_gb, p.price_cents "
+                "SELECT g.order_item_id, g.expire_at, g.status, g.granted_bytes, "
+                        + "       COALESCE(pp.sku_id, '') AS sku_id, "
+                        + "       COALESCE(pp.quantity, 1) AS quantity, "
+                        + "       COALESCE(pp.period_hours, 720) AS period_hours, "
+                        + "       pp.id AS provision_id "
                         + "FROM enterprise_pool_grant g "
                         + "LEFT JOIN portal_provision pp ON pp.order_item_id = g.order_item_id "
-                        + "LEFT JOIN portal_product_sku p ON p.sku_id = pp.sku_id "
-                        + "WHERE g.enterprise_id = ? AND g.order_item_id = ?", enterpriseId, orderItemId);
+                        + "WHERE g.enterprise_id = ? AND g.order_item_id = ?",
+                enterpriseId, orderItemId);
         if (rows.isEmpty()) {
             throw new IllegalArgumentException("找不到该套餐：" + orderItemId);
         }
         Map<String, Object> r = rows.get(0);
-        Object sku = r.get("sku_id");
-        if (sku == null || String.valueOf(sku).isBlank()) {
-            throw new IllegalArgumentException("该套餐查不到对应的商品，无法续费（请直接购买新套餐）");
+        String status = String.valueOf(r.get("status"));
+        if ("reclaimed".equals(status)) {
+            // 已回收的不能再续：容量已经从不池里扣掉了，单纯延长会变成白送空间
+            throw new IllegalArgumentException(
+                    "该套餐已到期回收，无法续费；请直接购买新套餐（续费只能延长未回收的套餐）");
         }
+        java.time.OffsetDateTime before = ((java.sql.Timestamp) r.get("expire_at")).toInstant()
+                .atOffset(java.time.ZoneOffset.ofHours(8));
+        int hours = ((Number) r.get("period_hours")).intValue();
+        // 从"原到期时间"或"现在"取较晚者为基准：已过期但未回收的，从今天起算一个周期
+        java.time.OffsetDateTime base = before.isAfter(java.time.OffsetDateTime.now())
+                ? before : java.time.OffsetDateTime.now();
+        java.time.OffsetDateTime after = base.plusHours(hours);
+
+        jdbc.update("UPDATE enterprise_pool_grant SET expire_at = ?, grace_end_at = ?, status = 'active', "
+                + "reclaimed_at = NULL, reclaimed_deducted = false WHERE order_item_id = ?",
+                after, after, orderItemId);
+        if (r.get("provision_id") != null) {
+            jdbc.update("UPDATE portal_provision SET expire_at = ?, status = 'active', "
+                            + "quota_reclaimed = false, grace_end_at = NULL, updated_at = now() "
+                            + "WHERE order_item_id = ?",
+                    after, orderItemId);
+        }
+        jdbc.update("INSERT INTO subscription_renewal (enterprise_id, grant_order_item_id, sku_id, quantity, "
+                        + "extend_hours, expire_at_before, expire_at_after, client_order_key, portal_order_id, "
+                        + "price_cents, status) VALUES (?,?,?,?,?,?,?,?,?,?,'applied') "
+                        + "ON CONFLICT (client_order_key) DO NOTHING",
+                enterpriseId, orderItemId, String.valueOf(r.get("sku_id")),
+                ((Number) r.get("quantity")).intValue(), hours, before, after,
+                clientOrderKey, portalOrderId, priceCents);
+        recompute(enterpriseId);
+
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("orderItemId", orderItemId);
-        out.put("skuId", String.valueOf(sku));
-        out.put("skuName", r.get("name"));
-        out.put("quotaGb", r.get("quota_gb"));
-        out.put("priceCents", r.get("price_cents"));
-        out.put("clientOrderKey", renewClientOrderKey(enterpriseId, orderItemId));
-        out.put("previousStatus", r.get("status"));
+        out.put("skuId", r.get("sku_id"));
+        out.put("quantity", ((Number) r.get("quantity")).intValue());
+        out.put("extendHours", hours);
+        out.put("extendDays", hours / 24);
+        out.put("expireAtBefore", before);
+        out.put("expireAtAfter", after);
+        out.put("grantedBytesUnchanged", r.get("granted_bytes"));
+        out.put("clientOrderKey", clientOrderKey);
+        out.put("portalOrderId", portalOrderId);
         return out;
     }
 
+    /**
+     * 回调识别：这次 provision 是不是某笔续费单带来的？
+     *
+     * <p>按 (企业, sku, 数量) 匹配 30 分钟内状态为 {@code applied} 的续费记录。
+     * 命中则把它标记为 {@code consumed} 并绑定 order_item_id —— 调用方据此**跳过发放**。
+     *
+     * @return 命中的续费记录；未命中返回 null（视为正常新购）
+     */
+    public Map<String, Object> consumeRenewalIfAny(long enterpriseId, String skuId, int quantity) {
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "SELECT id, grant_order_item_id, extend_hours, expire_at_before, expire_at_after "
+                        + "FROM subscription_renewal "
+                        + "WHERE enterprise_id = ? AND sku_id = ? AND quantity = ? AND status = 'applied' "
+                        + "  AND created_at > now() - interval '2 hours' "
+                        + "ORDER BY id LIMIT 1",
+                enterpriseId, skuId, quantity);
+        if (rows.isEmpty()) {
+            return null;
+        }
+        Map<String, Object> hit = rows.get(0);
+        jdbc.update("UPDATE subscription_renewal SET status = 'consumed', updated_at = now() "
+                + "WHERE id = ?", hit.get("id"));
+        return hit;
+    }
+
+    /** 回调里把命中续费的记录与门户新 order_item 关联起来（便于对账）。 */
+    public void bindRenewalToOrderItem(long renewalId, long orderItemId) {
+        jdbc.update("UPDATE subscription_renewal SET matched_order_item_id = ?, updated_at = now() WHERE id = ?",
+                orderItemId, renewalId);
+    }
     /**
      * 续费幂等键：{@code ent-<企业>-<订单项>-<yyyyMMdd>}。
      *

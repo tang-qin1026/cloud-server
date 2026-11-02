@@ -39,6 +39,10 @@ public class PortalProductService {
                     row.getPriceCents(),
                     row.getBillingMode(),
                     row.getPeriodHours(),
+                    // period_days：门户旧校验要求 billing_mode=1 时必填（包月=30）。
+                    // period_hours 仍是最权威的字段；这里只是让旧校验也能过。
+                    row.getPeriodHours() == null ? null
+                            : (int) Math.ceil(row.getPeriodHours() / 24.0),
                     row.getStock()));
         }
         return new ProductListVO(items);
