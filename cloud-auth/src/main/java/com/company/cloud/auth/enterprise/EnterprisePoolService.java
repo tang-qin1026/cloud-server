@@ -314,6 +314,36 @@ public class EnterprisePoolService {
             throw new IllegalArgumentException("找不到该套餐：" + orderItemId);
         }
         Map<String, Object> r = rows.get(0);
+
+        // ── 幂等（重要）：这个 clientOrderKey 已经续过一次了就直接返回旧结果 ──
+        //
+        // 门户对重复 clientOrderKey 返回 3003（duplicated=true，**本次没扣款**）。
+        // 若此处再延长一次，就会出现"只扣一次钱、到期时间被推 N 次"——
+        // 真实踩过：同一笔 355 连点 4 次，到期从 2026-12-02 被推到 2027-04-01，
+        // 但钱包只扣了 1 期（100 元）。
+        // 门户的幂等是对的，这一段是为了让**延长**也幂等。
+        List<Map<String, Object>> done = jdbc.queryForList(
+                "SELECT id, expire_at_before, expire_at_after, extend_hours "
+                        + "FROM subscription_renewal WHERE client_order_key = ?", clientOrderKey);
+        if (!done.isEmpty()) {
+            Map<String, Object> d = done.get(0);
+            log.info("[renew] 幂等命中 clientOrderKey={} 该笔已延长到 {}，本次不再延长",
+                    clientOrderKey, d.get("expire_at_after"));
+            Map<String, Object> again = new LinkedHashMap<>();
+            again.put("orderItemId", orderItemId);
+            again.put("skuId", r.get("sku_id"));
+            again.put("quantity", ((Number) r.get("quantity")).intValue());
+            again.put("extendHours", ((Number) d.get("extend_hours")).intValue());
+            again.put("extendDays", ((Number) d.get("extend_hours")).intValue() / 24);
+            again.put("expireAtBefore", d.get("expire_at_before"));
+            again.put("expireAtAfter", d.get("expire_at_after"));
+            again.put("grantedBytesUnchanged", r.get("granted_bytes"));
+            again.put("clientOrderKey", clientOrderKey);
+            again.put("portalOrderId", portalOrderId);
+            again.put("duplicated", true);
+            return again;
+        }
+
         String status = String.valueOf(r.get("status"));
         if ("reclaimed".equals(status)) {
             // 已回收的不能再续：容量已经从不池里扣掉了，单纯延长会变成白送空间

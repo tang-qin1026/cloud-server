@@ -91,6 +91,13 @@ public class UploadService {
         validateExtension(name);
         validateSha256(sha256);
 
+        // ── 超卖闸门必须放在**最前面**（2026-11-02 修正）──────────────
+        // 原来只在普通上传分支调 guardEnterprisePool()，结果**秒传分支**（L97 附近）
+        // 在它之前就 return 了 —— 表现为"企业已超额、前端横幅也提示了，
+        // 但传一个同 sha256 的文件照样成功"（真实踩过）。
+        // 秒传、普通上传、断点续传都不该绕过这条平台级限制。
+        ensureNotOversold(userId);
+
         long targetParent = parentId == null ? 0L : parentId;
 
         // 秒传分支：sha256 命中存活 files 记录 → 零字节传输，直接复用对象
@@ -544,16 +551,23 @@ public class UploadService {
      *
      * <p>无企业 / 无池（返回 -1）时跳过 —— 个人用户行为与之前完全一致。
      */
-    private void guardEnterprisePool(long userId, long size) {
-        // ── 企业超额停用（2026-10-30 口径）──────────────────────────────
-        // 可分配额度为负（池缩水但分配没收回来）时，关闭「上传 / 下载 / 预览」。
-        // 这是**平台级**限制，凌驾于企业管理员分配的权限之上 —— 管理员勾了也照样拦。
-        // 只关这三个动作，不拦登录与列表读取。
+    /**
+     * 超卖闸门（平台级，凌驾于角色权限之上）。
+     *
+     * <p>可分配额度为负时关闭「上传 / 下载 / 预览」。**所有上传入口都必须先过这一关**，
+     * 包括秒传 —— 秒传只是省掉字节传输，仍然占用额度，也不该绕过停用状态。
+     */
+    private void ensureNotOversold(long userId) {
         if (quotaRepo.enterpriseOversold(userId)) {
             throw new BizException(ErrorCode.FORBIDDEN,
                     "企业空间已超额（可分配额度为负），请联系企业管理员处理；"
                             + "当前无法上传、下载、预览文件");
         }
+    }
+
+    private void guardEnterprisePool(long userId, long size) {
+        // 超卖已由 ensureNotOversold 在入口处处理；这里再兜一次（complete 等路径）
+        ensureNotOversold(userId);
         // 企业套餐到期后：可读可下载，**禁止上传**（2026-10-30 口径：无宽限期，到期即回收）。
         // 判定放在上传口而不是只靠登录口 —— 已登录的会话也要拦住。
         if (quotaRepo.enterpriseInGraceOnly(userId)) {
