@@ -63,11 +63,20 @@ public class OrderController {
     private final PortalOrderClient orderClient;
     private final PortalUserMapRepository portalUserMapRepository;
     private final com.company.cloud.portal.config.PortalProperties props;
+    /** 判「企业管理员 / owner」用；企业内普通成员不允许下单。 */
+    private final com.company.cloud.auth.repository.UserRepository userRepository;
+    private final com.company.cloud.auth.org.mapper.OrgWriteMapper orgWriteMapper;
 
     /** 下单并支付。 */
     @PostMapping
     public Result<JsonNode> create(Authentication authentication, @RequestBody CreateOrderRequest req) {
         CurrentUser cu = currentUser(authentication);
+        // 谁能下单（2026-11-02 口径）：
+        //   · 企业管理员 / owner  → 可以（额度进企业池，由他再分给成员）
+        //   · 个人域用户          → 可以（额度进自己）
+        //   · 企业内普通成员      → **只能看套餐，不能下单**
+        //     否则员工自购会被吞进公司池（或变成员工个人额度但归企业管），账目混乱。
+        assertCanPurchase(cu);
         String portalUserId = resolvePortalUserId(cu);
 
         String key = req.clientOrderKey() == null ? "" : req.clientOrderKey().trim();
@@ -185,5 +194,33 @@ public class OrderController {
      */
     public record CreateOrderRequest(String skuId, Integer quantity,
                                      String clientOrderKey, String consentRef) {
+    }
+    /**
+     * 下单资格校验（套餐增值页的核心规则）。
+     *
+     * <p>企业内**普通成员**没有下单权：他们只能浏览套餐。
+     * 判定与 provision 入池的判定保持一致 ——
+     * {@code enterprise_role = 1} 或 {@code enterprise.owner_user_id = 本人} 才算企业购买方。
+     *
+     * <p>个人域用户（{@code enterprise_id = 0}）不受限。
+     */
+    private void assertCanPurchase(CurrentUser cu) {
+        if (cu.isAdmin()) {
+            return;   // 平台管理员不受限
+        }
+        Long entId = cu.getEnterpriseId();
+        if (entId == null || entId <= 0L) {
+            return;   // 个人域用户可买
+        }
+        Integer er = cu.getEnterpriseRole();
+        if (er != null && er == 1) {
+            return;   // 企业管理员可买
+        }
+        Long ownerId = orgWriteMapper.selectEnterpriseOwner(entId);
+        if (ownerId != null && ownerId.equals(cu.getId())) {
+            return;   // owner 可买（可能 er=0）
+        }
+        throw new BizException(ErrorCode.FORBIDDEN,
+                "企业成员只能查看套餐，如需增购请联系企业管理员");
     }
 }
