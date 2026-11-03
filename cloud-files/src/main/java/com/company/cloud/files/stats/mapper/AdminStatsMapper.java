@@ -16,7 +16,10 @@ import java.util.List;
  * 管理端大盘统计 SQL（R-C09）。
  *
  * <p>跨模块只读：quota_bytes / used_bytes 归 A 组 users 表，extra_bytes（计费增量额度，字节）归 D 组 billing 维护，audit_logs 归 C 组。
- * 总额度 = quota_bytes + extra_bytes（免费 + 计费增量之和，2026-09-23 修正：此前漏算 extra_bytes）。
+ * 总额度 = quota_bytes + extra_bytes + enterprise_allocated_bytes
+ *        （免费 + 计费增量 + 管理员分配的企业额度）。
+ *        2026-11-03 修正：此前漏算 enterprise_allocated_bytes，
+ *        企业买了套餐、管理员把额度分给成员后，统计大盘的"总配额"仍只显示每人 1GB 免费额度。
  * 统一用本 Mapper 直查表而非引入跨模块 Repository 依赖，与 AuditLogMapper.selectUsernames 同模式。
  */
 @Mapper
@@ -36,9 +39,9 @@ public interface AdminStatsMapper {
      */
     @Select("""
             <script>
-            SELECT COALESCE(SUM(quota_bytes + extra_bytes), 0) AS total_quota_bytes,
+            SELECT COALESCE(SUM(quota_bytes + extra_bytes + COALESCE(enterprise_allocated_bytes, 0)), 0) AS total_quota_bytes,
                    COALESCE(SUM(used_bytes), 0) AS used_bytes,
-                   GREATEST(COALESCE(SUM(quota_bytes + extra_bytes), 0)
+                   GREATEST(COALESCE(SUM(quota_bytes + extra_bytes + COALESCE(enterprise_allocated_bytes, 0)), 0)
                           - COALESCE(SUM(used_bytes), 0), 0) AS remaining_bytes,
                    COUNT(*) AS user_count
             FROM users
@@ -62,7 +65,7 @@ public interface AdminStatsMapper {
             SELECT id          AS user_id,
                    username,
                    used_bytes,
-                   quota_bytes,
+                   quota_bytes + extra_bytes + COALESCE(enterprise_allocated_bytes, 0) AS quota_bytes,
                    nickname
             FROM users
             <where>
