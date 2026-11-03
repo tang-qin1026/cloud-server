@@ -445,6 +445,23 @@ public class EnterprisePoolService {
                 orderItemId, renewalId);
     }
 
+
+    /** 节流窗口（秒）：同一笔套餐在该窗口内只允许提交一次续费，防手抖连点。 */
+    @org.springframework.beans.factory.annotation.Value("${app.enterprise.renew-throttle-seconds:3}")
+    private int renewThrottleSeconds;
+
+    /**
+     * 生成续费幂等键：{@code rnw-<企业>-<订单项>-<秒级时间戳><随机>}。
+     *
+     * <p>2026-11-03 口径变更：**取消按天限制**。原来 key 里带 {@code yyyyMMdd}，
+     * 导致同一笔套餐一天只能续一次；现在每次续费都是独立一笔（各自扣款、各自延长），
+     * 防连点改由上面的秒级节流负责。
+     */
+    private String newRenewalKey(long enterpriseId, long orderItemId) {
+        return "rnw-" + enterpriseId + "-" + orderItemId + "-"
+                + java.time.Instant.now().getEpochSecond()
+                + Integer.toHexString(java.util.concurrent.ThreadLocalRandom.current().nextInt(0xFFFF));
+    }
     // ── 两阶段记账 · 第一阶段：扣款前记账 ────────────────────────
 
     /**
@@ -460,8 +477,46 @@ public class EnterprisePoolService {
      *         调用方**不要再扣款**，把 {@code existing} 返回给前端即可
      */
     @Transactional(rollbackFor = Exception.class)
-    public Map<String, Object> beginRenewal(long enterpriseId, long orderItemId,
-                                            String clientOrderKey, long priceCents) {
+    public Map<String, Object> beginRenewal(long enterpriseId, long orderItemId, long priceCents) {
+        // ── 节流（2026-11-03 口径变更）──────────────────────────────
+        // 取消"同一笔每天只能续一次"，改为**按秒节流**，防的是手抖连点，不是业务限制。
+        // 同一天可以反复续费（每次真实扣款、每次延长一个周期）。
+        // 注意：PostgreSQL 的 count(*) 返回 Long，不能直接强转 Integer
+        Object recentRaw = jdbc.queryForMap(
+                        "SELECT count(*) AS cnt FROM subscription_renewal "
+                                + "WHERE enterprise_id = ? AND grant_order_item_id = ? "
+                                + "  AND created_at > now() - (? || ' seconds')::interval",
+                        enterpriseId, orderItemId, String.valueOf(renewThrottleSeconds))
+                .get("cnt");
+        long recent = recentRaw instanceof Number n ? n.longValue() : 0L;
+        if (recent > 0) {
+            throw new IllegalArgumentException(
+                    "续费操作过于频繁，请 " + renewThrottleSeconds + " 秒后再试");
+        }
+
+        // ── 未完成的续费（扣了款但延长失败）→ 复用它的 key 继续做 ─────────
+        // 必须复用同一个 clientOrderKey：门户对重复 key 返回 3003 不再扣款，
+        // 否则重试会变成一笔新订单、再扣一次钱。
+        List<Map<String, Object>> unfinished = jdbc.queryForList(
+                "SELECT id, client_order_key, status, expire_at_before, expire_at_after, extend_hours "
+                        + "FROM subscription_renewal "
+                        + "WHERE enterprise_id = ? AND grant_order_item_id = ? "
+                        + "  AND status IN ('pending','orphan') "
+                        + "  AND created_at > now() - interval '30 minutes' "
+                        + "ORDER BY id LIMIT 1", enterpriseId, orderItemId);
+        if (!unfinished.isEmpty()) {
+            Map<String, Object> u = unfinished.get(0);
+            Map<String, Object> resume = new LinkedHashMap<>();
+            resume.put("chargeRequired", true);
+            resume.put("resumed", true);
+            resume.put("clientOrderKey", u.get("client_order_key"));
+            resume.put("renewalId", u.get("id"));
+            log.info("[renew] 复用未完成的续费记录 key={} status={}（避免重复扣款）",
+                    u.get("client_order_key"), u.get("status"));
+            return resume;
+        }
+
+        String clientOrderKey = newRenewalKey(enterpriseId, orderItemId);
         List<Map<String, Object>> rows = jdbc.queryForList(
                 "SELECT g.order_item_id, g.expire_at, g.status, g.granted_bytes, "
                         + "       COALESCE(pp.sku_id, '') AS sku_id, "
@@ -527,6 +582,7 @@ public class EnterprisePoolService {
         out.put("quantity", ((Number) r.get("quantity")).intValue());
         out.put("expireAtBefore", before);
         out.put("expireAtAfter", after);
+        out.put("clientOrderKey", clientOrderKey);
         log.info("[renew] 已记账(pending) ent={} item={} key={} 到期 {} → {}",
                 enterpriseId, orderItemId, clientOrderKey, before, after);
         return out;
