@@ -59,6 +59,16 @@ public class UploadService {
     private final UserQuotaRepository quotaRepo;
     private final AuditService auditService;
 
+    /**
+     * 数据范围解析（用于判断"非本人文件是否在我的可视范围内"）。
+     *
+     * <p>用 {@code ObjectProvider} 延迟取 Bean：cloud-transfer 依赖 cloud-auth，
+     * 但 org 侧也用到了文件相关能力，直接构造注入容易形成环。
+     */
+    @org.springframework.beans.factory.annotation.Autowired
+    private org.springframework.beans.factory.ObjectProvider<
+            com.company.cloud.auth.org.OrgService> orgServiceProvider;
+
     private final long maxFileSize;               // 默认 10GB
     private final Set<String> allowedExtensions;  // 扩展名白名单
     private final int presignExpirySeconds;       // 默认 300 秒
@@ -337,16 +347,36 @@ public class UploadService {
         }
         FileEntity f = fileRepo.findById(fileId)
                 .orElseThrow(() -> new BizException(ErrorCode.FILE_NOT_FOUND));
-        if (!f.getOwnerId().equals(userId) || f.getDeletedAt() != null) {
+        if (f.getDeletedAt() != null) {
             throw new BizException(ErrorCode.FORBIDDEN);
+        }
+        // ── 下载/预览的可见性判定（2026-11-03 口径变更）──────────────
+        // 原实现：只能下载**自己**的文件（ownerId == userId），与数据范围无关。
+        // 现口径：**有权限 + 文件在我的数据可视范围内** 即可操作，
+        // 也就是"给员工分配了下载权限，他就能下载可视范围内的所有文件"。
+        // 范围由 org.visibleOwnerIds(cu) 解析（self / dept / dept_below / dept_subtree / all）。
+        boolean isOwner = f.getOwnerId().equals(userId);
+        boolean inScope = false;
+        if (!isOwner) {
+            inScope = visibleOwnerIds(userId).contains(f.getOwnerId());
+            if (!inScope) {
+                throw new BizException(ErrorCode.FORBIDDEN,
+                        "该文件不在你的数据范围内，无法下载或预览");
+            }
         }
         try {
             // 5 分钟预签名 URL；字节流走 Nginx → MinIO，不过应用进程
             // inline=true 供预览（不强制 attachment），否则供下载（带文件名 attachment）
             String url = minio.presignGet(objectKeyOf(f.getSha256()), f.getName(), presignExpirySeconds, inline);
+            Map<String, Object> detail = new java.util.LinkedHashMap<>();
+            detail.put("name", f.getName());
+            detail.put("size", f.getSize());
+            detail.put("inline", inline);
+            // 下载他人文件时留痕，便于审计追溯（谁在什么时候拿了谁的文件）
+            detail.put("ownerId", f.getOwnerId());
+            detail.put("otherUser", !isOwner);
             auditService.record(new AuditEvent(
-                    userId, AuditActions.DOWNLOAD, String.valueOf(f.getId()), null,
-                    Map.of("name", f.getName(), "size", f.getSize(), "inline", inline)));
+                    userId, AuditActions.DOWNLOAD, String.valueOf(f.getId()), null, detail));
             return url;
         } catch (Exception e) {
             throw new BizException(ErrorCode.SYSTEM_ERROR, "生成下载地址失败");
@@ -587,5 +617,27 @@ public class UploadService {
             throw new BizException(ErrorCode.STORAGE_QUOTA_EXCEEDED,
                     "企业空间不足：" + (poolLeft / 1024 / 1024) + " MB（请联系管理员续费或调整分配）");
         }
+    }
+    /**
+     * 当前登录用户的可视 owner 集合。
+     *
+     * <p>从 SecurityContext 取 {@code CurrentUser}（与 FileNodeServiceImpl 同一写法），
+     * 交给 org 侧按 data_scope 展开；取不到就退化为"仅自己"，**fail-closed**。
+     */
+    private java.util.Set<Long> visibleOwnerIds(long userId) {
+        try {
+            var auth = org.springframework.security.core.context.SecurityContextHolder
+                    .getContext().getAuthentication();
+            if (auth != null
+                    && auth.getPrincipal() instanceof com.company.cloud.auth.security.CurrentUser cu) {
+                var org = orgServiceProvider == null ? null : orgServiceProvider.getIfAvailable();
+                if (org != null) {
+                    return new java.util.LinkedHashSet<>(org.visibleOwnerIds(cu));
+                }
+            }
+        } catch (Exception e) {
+            log.warn("[download] 解析数据范围失败，按仅本人处理 userId={} err={}", userId, e.toString());
+        }
+        return java.util.Set.of(userId);
     }
 }
