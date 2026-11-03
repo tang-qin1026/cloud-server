@@ -322,17 +322,20 @@ public class EnterprisePoolService {
         }
         Map<String, Object> r = rows.get(0);
 
-        // ── 幂等（重要）：这个 clientOrderKey 已经续过一次了就直接返回旧结果 ──
+        // ── 幂等（重要）：这个 clientOrderKey 已经**延长过**了就直接返回旧结果 ──
         //
         // 门户对重复 clientOrderKey 返回 3003（duplicated=true，**本次没扣款**）。
         // 若此处再延长一次，就会出现"只扣一次钱、到期时间被推 N 次"——
         // 真实踩过：同一笔 355 连点 4 次，到期从 2026-12-02 被推到 2027-04-01，
         // 但钱包只扣了 1 期（100 元）。
-        // 门户的幂等是对的，这一段是为了让**延长**也幂等。
+        //
+        // 注意：pending / orphan 不算"已完成" —— 那是两阶段记账的中间态
+        // （已记账但还没扣款/还没延长），必须继续往下走完成延长。
         List<Map<String, Object>> done = jdbc.queryForList(
-                "SELECT id, expire_at_before, expire_at_after, extend_hours "
+                "SELECT id, status, expire_at_before, expire_at_after, extend_hours "
                         + "FROM subscription_renewal WHERE client_order_key = ?", clientOrderKey);
-        if (!done.isEmpty()) {
+        if (!done.isEmpty() && !"pending".equals(String.valueOf(done.get(0).get("status")))
+                && !"orphan".equals(String.valueOf(done.get(0).get("status")))) {
             Map<String, Object> d = done.get(0);
             log.info("[renew] 幂等命中 clientOrderKey={} 该笔已延长到 {}，本次不再延长",
                     clientOrderKey, d.get("expire_at_after"));
@@ -374,13 +377,21 @@ public class EnterprisePoolService {
                             + "WHERE order_item_id = ?",
                     after, orderItemId);
         }
-        jdbc.update("INSERT INTO subscription_renewal (enterprise_id, grant_order_item_id, sku_id, quantity, "
-                        + "extend_hours, expire_at_before, expire_at_after, client_order_key, portal_order_id, "
-                        + "price_cents, status) VALUES (?,?,?,?,?,?,?,?,?,?,'applied') "
-                        + "ON CONFLICT (client_order_key) DO NOTHING",
-                enterpriseId, orderItemId, String.valueOf(r.get("sku_id")),
-                ((Number) r.get("quantity")).intValue(), hours, before, after,
-                clientOrderKey, portalOrderId, priceCents);
+        // 两阶段记账 · 第二阶段：pending/orphan → applied（延长已完成）。
+        // 若没有 pending 行（历史路径），退化为直接插一条 applied。
+        int updated = jdbc.update(
+                "UPDATE subscription_renewal SET status = 'applied', portal_order_id = ?, "
+                        + "updated_at = now() WHERE client_order_key = ? AND status IN ('pending','orphan')",
+                portalOrderId, clientOrderKey);
+        if (updated == 0) {
+            jdbc.update("INSERT INTO subscription_renewal (enterprise_id, grant_order_item_id, sku_id, quantity, "
+                            + "extend_hours, expire_at_before, expire_at_after, client_order_key, portal_order_id, "
+                            + "price_cents, status) VALUES (?,?,?,?,?,?,?,?,?,?,'applied') "
+                            + "ON CONFLICT (client_order_key) DO NOTHING",
+                    enterpriseId, orderItemId, String.valueOf(r.get("sku_id")),
+                    ((Number) r.get("quantity")).intValue(), hours, before, after,
+                    clientOrderKey, portalOrderId, priceCents);
+        }
         recompute(enterpriseId);
 
         Map<String, Object> out = new LinkedHashMap<>();
@@ -406,10 +417,14 @@ public class EnterprisePoolService {
      * @return 命中的续费记录；未命中返回 null（视为正常新购）
      */
     public Map<String, Object> consumeRenewalIfAny(long enterpriseId, String skuId, int quantity) {
+        // 关键：状态必须包含 pending —— 两阶段记账下，回调很可能在"已记账、还没延长"时到达，
+        // 若只认 applied，这一刻就会被当成新购买从而多发一份容量（第一版实现踩过）。
         List<Map<String, Object>> rows = jdbc.queryForList(
-                "SELECT id, grant_order_item_id, extend_hours, expire_at_before, expire_at_after "
+                "SELECT id, grant_order_item_id, extend_hours, expire_at_before, expire_at_after, status "
                         + "FROM subscription_renewal "
-                        + "WHERE enterprise_id = ? AND sku_id = ? AND quantity = ? AND status = 'applied' "
+                        + "WHERE enterprise_id = ? AND sku_id = ? AND quantity = ? "
+                        + "  AND status IN ('pending','applied','orphan') "
+                        + "  AND callback_consumed = FALSE "
                         + "  AND created_at > now() - interval '2 hours' "
                         + "ORDER BY id LIMIT 1",
                 enterpriseId, skuId, quantity);
@@ -417,7 +432,9 @@ public class EnterprisePoolService {
             return null;
         }
         Map<String, Object> hit = rows.get(0);
-        jdbc.update("UPDATE subscription_renewal SET status = 'consumed', updated_at = now() "
+        // 用 callback_consumed 标记认领，而不是把 status 改成 consumed：
+        // 回调可能先于延长到达，status 还得继续走 pending → applied。
+        jdbc.update("UPDATE subscription_renewal SET callback_consumed = TRUE, updated_at = now() "
                 + "WHERE id = ?", hit.get("id"));
         return hit;
     }
@@ -426,6 +443,93 @@ public class EnterprisePoolService {
     public void bindRenewalToOrderItem(long renewalId, long orderItemId) {
         jdbc.update("UPDATE subscription_renewal SET matched_order_item_id = ?, updated_at = now() WHERE id = ?",
                 orderItemId, renewalId);
+    }
+
+    // ── 两阶段记账 · 第一阶段：扣款前记账 ────────────────────────
+
+    /**
+     * 续费第一阶段：在扣款**之前**落一条 {@code pending} 记录。
+     *
+     * <p>为什么必须先记账：扣款是外部 HTTP 调用、不可回滚。若先扣款再记账，
+     * 一旦记账失败，门户随后回调 {@code /internal/provision} 时查不到续费记录，
+     * 就会把这笔当成【新购买】发放容量 —— 付一次钱拿到两份收益（真实踩过）。
+     * 先落 pending 后，即使紧接着崩溃，回调也能看到 pending 从而跳过发放；
+     * 重试则沿用同一 {@code clientOrderKey}，门户返回 3003 不会重复扣款。
+     *
+     * @return {@code chargeRequired=false} 表示这笔已经完成过（applied/consumed），
+     *         调用方**不要再扣款**，把 {@code existing} 返回给前端即可
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> beginRenewal(long enterpriseId, long orderItemId,
+                                            String clientOrderKey, long priceCents) {
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "SELECT g.order_item_id, g.expire_at, g.status, g.granted_bytes, "
+                        + "       COALESCE(pp.sku_id, '') AS sku_id, "
+                        + "       COALESCE(pp.quantity, 1) AS quantity, "
+                        + "       COALESCE(pp.period_hours, 720) AS period_hours "
+                        + "FROM enterprise_pool_grant g "
+                        + "LEFT JOIN portal_provision pp ON pp.order_item_id = g.order_item_id "
+                        + "WHERE g.enterprise_id = ? AND g.order_item_id = ?",
+                enterpriseId, orderItemId);
+        if (rows.isEmpty()) {
+            throw new IllegalArgumentException("找不到该套餐：" + orderItemId);
+        }
+        Map<String, Object> r = rows.get(0);
+        if ("reclaimed".equals(String.valueOf(r.get("status")))) {
+            throw new IllegalArgumentException(
+                    "该套餐已到期回收，无法续费；请直接购买新套餐（续费只能延长未回收的套餐）");
+        }
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        List<Map<String, Object>> done = jdbc.queryForList(
+                "SELECT id, status, expire_at_before, expire_at_after, extend_hours "
+                        + "FROM subscription_renewal WHERE client_order_key = ?", clientOrderKey);
+        if (!done.isEmpty()) {
+            Map<String, Object> d = done.get(0);
+            String st = String.valueOf(d.get("status"));
+            out.put("orderItemId", orderItemId);
+            out.put("skuId", r.get("sku_id"));
+            out.put("quantity", ((Number) r.get("quantity")).intValue());
+            out.put("grantedBytesUnchanged", r.get("granted_bytes"));
+            if ("applied".equals(st) || "consumed".equals(st)) {
+                // 已经完成：不要再扣款
+                out.put("chargeRequired", false);
+                out.put("existing", d);
+                return out;
+            }
+            // pending / orphan：继续用同一个 key 扣款（门户幂等，不会重复扣）
+            log.info("[renew] 命中未完成续费记录 status={} key={}，继续扣款（门户幂等）", st, clientOrderKey);
+            out.put("chargeRequired", true);
+            out.put("renewalId", d.get("id"));
+            out.put("expireAtBefore", d.get("expire_at_before"));
+            out.put("expireAtAfter", d.get("expire_at_after"));
+            return out;
+        }
+
+        java.time.OffsetDateTime before = ((java.sql.Timestamp) r.get("expire_at")).toInstant()
+                .atOffset(java.time.ZoneOffset.ofHours(8));
+        int hours = ((Number) r.get("period_hours")).intValue();
+        java.time.OffsetDateTime base = before.isAfter(java.time.OffsetDateTime.now())
+                ? before : java.time.OffsetDateTime.now();
+        java.time.OffsetDateTime after = base.plusHours(hours);
+
+        jdbc.update("INSERT INTO subscription_renewal (enterprise_id, grant_order_item_id, sku_id, "
+                        + "quantity, extend_hours, expire_at_before, expire_at_after, client_order_key, "
+                        + "price_cents, status) VALUES (?,?,?,?,?,?,?,?,?,'pending') "
+                        + "ON CONFLICT (client_order_key) DO NOTHING",
+                enterpriseId, orderItemId, String.valueOf(r.get("sku_id")),
+                ((Number) r.get("quantity")).intValue(), hours, before, after,
+                clientOrderKey, priceCents);
+
+        out.put("chargeRequired", true);
+        out.put("orderItemId", orderItemId);
+        out.put("skuId", r.get("sku_id"));
+        out.put("quantity", ((Number) r.get("quantity")).intValue());
+        out.put("expireAtBefore", before);
+        out.put("expireAtAfter", after);
+        log.info("[renew] 已记账(pending) ent={} item={} key={} 到期 {} → {}",
+                enterpriseId, orderItemId, clientOrderKey, before, after);
+        return out;
     }
     // ── 可用额度 / 超卖 ───────────────────────────────────────
 

@@ -215,6 +215,39 @@ public class PackageController {
 
         String key = "rnw-" + entId + "-" + orderItemId + "-"
                 + java.time.LocalDate.now().format(java.time.format.DateTimeFormatter.BASIC_ISO_DATE);
+        long priceCents = ((Number) one.get("totalPriceCents")).longValue();
+
+        // 两阶段记账 · 第一阶段：先记账（pending），再扣款。
+        // 这笔若已完成过（applied/consumed），直接返回旧结果，**不再扣款**。
+        Map<String, Object> begun;
+        try {
+            begun = poolService.beginRenewal(entId, orderItemId, key, priceCents);
+        } catch (IllegalArgumentException e) {
+            throw new BizException(ErrorCode.BAD_REQUEST, e.getMessage());
+        }
+        if (!Boolean.TRUE.equals(begun.get("chargeRequired"))) {
+            Object existing = begun.get("existing");
+            Map<String, Object> again = new LinkedHashMap<>();
+            again.put("orderItemId", orderItemId);
+            again.put("skuId", begun.get("skuId"));
+            again.put("quantity", begun.get("quantity"));
+            if (existing instanceof Map<?, ?> ex) {
+                again.put("expireAtBefore", ex.get("expire_at_before"));
+                again.put("expireAtAfter", ex.get("expire_at_after"));
+                Object h = ex.get("extend_hours");
+                if (h instanceof Number n) {
+                    again.put("extendHours", n.intValue());
+                    again.put("extendDays", n.intValue() / 24);
+                }
+            }
+            again.put("grantedBytesUnchanged", begun.get("grantedBytesUnchanged"));
+            again.put("clientOrderKey", key);
+            again.put("duplicated", true);
+            again.put("pool", poolService.pool(entId));
+            log.info("[renew] 幂等命中（已完成）ent={} orderItem={} key={}", entId, orderItemId, key);
+            return Result.ok(again);
+        }
+
         List<Map<String, Object>> items = new ArrayList<>();
         items.add(Map.of("product_code", props.getProductCode(), "sku_id", skuId, "quantity", quantity));
 
@@ -225,7 +258,6 @@ public class PackageController {
                     "门户下单失败（code=" + resp.code() + "）：" + resp.message());
         }
         String portalOrderId = resp.data() == null ? null : resp.data().path("order_id").asText(null);
-        long priceCents = ((Number) one.get("totalPriceCents")).longValue();
 
         Map<String, Object> out;
         try {
