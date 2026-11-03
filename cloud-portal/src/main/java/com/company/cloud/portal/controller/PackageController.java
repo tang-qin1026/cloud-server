@@ -222,7 +222,19 @@ public class PackageController {
         String portalOrderId = resp.data() == null ? null : resp.data().path("order_id").asText(null);
         long priceCents = ((Number) one.get("totalPriceCents")).longValue();
 
-        Map<String, Object> out = poolService.applyRenewal(entId, orderItemId, key, portalOrderId, priceCents);
+        Map<String, Object> out;
+        try {
+            out = poolService.applyRenewal(entId, orderItemId, key, portalOrderId, priceCents);
+        } catch (Exception e) {
+            // 走到这里说明**门户已经扣款成功**，但本地延长失败。
+            // 不能静默吞掉：把幂等键和门户订单号打出来，前端也提示可安全重试。
+            log.error("[renew] 已扣款但延长失败 ent={} orderItem={} key={} portalOrder={} err={}",
+                    entId, orderItemId, key, portalOrderId, e.toString());
+            throw new BizException(ErrorCode.BAD_REQUEST,
+                    "已扣款但续费写入失败，请**重新点击续费**（同一幂等键会跳过重复扣款），"
+                            + "若仍失败请联系管理员并提供订单号 " + portalOrderId
+                            + " / 幂等键 " + key);
+        }
         out.put("portalOrderId", portalOrderId);
         out.put("priceCents", priceCents);
         out.put("priceYuan", BigDecimal.valueOf(priceCents).movePointLeft(2).toPlainString());

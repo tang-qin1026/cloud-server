@@ -4,6 +4,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.sql.Timestamp;
 import java.time.OffsetDateTime;
@@ -297,9 +298,15 @@ public class EnterprisePoolService {
      *
      * @return 延长前后的到期时间，供接口回给前端
      */
+    @Transactional(rollbackFor = Exception.class)
     public Map<String, Object> applyRenewal(long enterpriseId, long orderItemId,
                                             String clientOrderKey, String portalOrderId,
                                             long priceCents) {
+        // 事务边界（2026-11-03 补）：下面有 3 条写 + 一次池重算，必须原子。
+        // 没有事务时的真实风险：门户已经扣了钱，若这里第 1 条 UPDATE 成功、
+        // 第 2 条失败，就会出现 grant 已延长、provision 还是旧到期时间，
+        // 04:00 的 provision 定时任务会按旧时间把它判成过期并回收 ——
+        // 表现为"续费成功了，但又被打回到期"。
         List<Map<String, Object>> rows = jdbc.queryForList(
                 "SELECT g.order_item_id, g.expire_at, g.status, g.granted_bytes, "
                         + "       COALESCE(pp.sku_id, '') AS sku_id, "
@@ -419,16 +426,6 @@ public class EnterprisePoolService {
     public void bindRenewalToOrderItem(long renewalId, long orderItemId) {
         jdbc.update("UPDATE subscription_renewal SET matched_order_item_id = ?, updated_at = now() WHERE id = ?",
                 orderItemId, renewalId);
-    }
-    /**
-     * 续费幂等键：{@code ent-<企业>-<订单项>-<yyyyMMdd>}。
-     *
-     * <p>同一天对同一笔重复点击只成功一次（门户按 clientOrderKey 幂等），
-     * 避免手抖连点扣两次钱；换天再点视为新的一期，是合理的。
-     */
-    public static String renewClientOrderKey(long enterpriseId, long orderItemId) {
-        return "ent-" + enterpriseId + "-" + orderItemId + "-"
-                + java.time.LocalDate.now().format(java.time.format.DateTimeFormatter.BASIC_ISO_DATE);
     }
     // ── 可用额度 / 超卖 ───────────────────────────────────────
 
