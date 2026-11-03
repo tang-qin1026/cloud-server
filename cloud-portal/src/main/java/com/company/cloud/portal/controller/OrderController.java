@@ -3,6 +3,9 @@ package com.company.cloud.portal.controller;
 import com.company.cloud.auth.entity.PortalUserMap;
 import com.company.cloud.auth.repository.PortalUserMapRepository;
 import com.company.cloud.auth.security.CurrentUser;
+import com.company.cloud.common.audit.AuditActions;
+import com.company.cloud.common.audit.AuditEvent;
+import com.company.cloud.common.audit.AuditService;
 import com.company.cloud.common.result.BizException;
 import com.company.cloud.common.result.ErrorCode;
 import com.company.cloud.common.result.Result;
@@ -62,6 +65,8 @@ public class OrderController {
 
     private final PortalOrderClient orderClient;
     private final PortalUserMapRepository portalUserMapRepository;
+    /** 购买/续费都要进审计日志（2026-11-03）。 */
+    private final AuditService auditService;
     private final com.company.cloud.portal.config.PortalProperties props;
     /** 判「企业管理员 / owner」用；企业内普通成员不允许下单。 */
     private final com.company.cloud.auth.repository.UserRepository userRepository;
@@ -103,13 +108,26 @@ public class OrderController {
         PortalApiResponse r = orderClient.createOrder(portalUserId, key, items, req.consentRef());
         if (r.success()) {
             JsonNode d = r.data();
-            if (d != null && d.path("duplicated").asBoolean(false)) {
-                log.info("[order] 幂等重放 productUserId={} key={} orderId={}",
-                        cu.getId(), key, d.path("order_id").asText(null));
+            boolean duplicated = d != null && d.path("duplicated").asBoolean(false);
+            String orderId = d == null ? null : d.path("order_id").asText(null);
+            long totalCents = d == null ? 0L : d.path("total_cents").asLong(0);
+            if (duplicated) {
+                log.info("[order] 幂等重放 productUserId={} key={} orderId={}", cu.getId(), key, orderId);
             } else {
                 log.info("[order] 下单成功 productUserId={} key={} orderId={} total={}",
-                        cu.getId(), key, d.path("order_id").asText(null), d.path("total_cents").asLong(0));
+                        cu.getId(), key, orderId, totalCents);
             }
+            // 购买套餐进审计日志（2026-11-03）
+            Map<String, Object> detail = new LinkedHashMap<>();
+            detail.put("skuId", req.skuId());
+            detail.put("quantity", quantity);
+            detail.put("totalCents", totalCents);
+            detail.put("clientOrderKey", key);
+            detail.put("duplicated", duplicated);
+            detail.put("enterprise", cu.getEnterpriseId() != null && cu.getEnterpriseId() > 0L
+                    ? "enterprise" : "personal");
+            auditService.record(new AuditEvent(
+                    cu.getId(), AuditActions.BILLING_ORDER, orderId, null, detail));
         }
         return Result.ok(unwrap(r, "下单"));
     }

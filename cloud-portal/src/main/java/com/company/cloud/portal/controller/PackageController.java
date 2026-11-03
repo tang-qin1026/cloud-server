@@ -2,6 +2,9 @@ package com.company.cloud.portal.controller;
 
 import com.company.cloud.auth.repository.UserRepository;
 import com.company.cloud.auth.security.CurrentUser;
+import com.company.cloud.common.audit.AuditActions;
+import com.company.cloud.common.audit.AuditEvent;
+import com.company.cloud.common.audit.AuditService;
 import com.company.cloud.common.result.BizException;
 import com.company.cloud.common.result.ErrorCode;
 import com.company.cloud.common.result.Result;
@@ -58,6 +61,8 @@ public class PackageController {
 
     private final com.company.cloud.portal.config.PortalProperties props;
     private final PortalProductSkuMapper skuMapper;
+    /** 续费要进审计日志（2026-11-03）。 */
+    private final AuditService auditService;
     private final PortalOrderClient orderClient;
     private final PortalUserMapRepository portalUserMapRepository;
     private final com.company.cloud.auth.enterprise.EnterprisePoolService poolService;
@@ -239,6 +244,23 @@ public class PackageController {
         out.put("priceCents", priceCents);
         out.put("priceYuan", BigDecimal.valueOf(priceCents).movePointLeft(2).toPlainString());
         out.put("pool", poolService.pool(entId));
+
+        // 续费进审计日志（2026-11-03）
+        Map<String, Object> detail = new LinkedHashMap<>();
+        detail.put("orderItemId", orderItemId);
+        detail.put("skuId", skuId);
+        detail.put("quantity", quantity);
+        detail.put("extendHours", out.get("extendHours"));
+        detail.put("extendDays", out.get("extendDays"));
+        detail.put("expireAtBefore", String.valueOf(out.get("expireAtBefore")));
+        detail.put("expireAtAfter", String.valueOf(out.get("expireAtAfter")));
+        detail.put("priceCents", priceCents);
+        detail.put("clientOrderKey", key);
+        detail.put("portalOrderId", portalOrderId);
+        detail.put("duplicated", Boolean.TRUE.equals(out.get("duplicated")));
+        auditService.record(new AuditEvent(
+                cu.getId(), AuditActions.BILLING_RENEW, String.valueOf(orderItemId), null, detail));
+
         log.info("[renew] 企业 {} 续费 orderItem={} sku={} x{} 到期 {} → {} 门户单={}",
                 entId, orderItemId, skuId, quantity,
                 out.get("expireAtBefore"), out.get("expireAtAfter"), portalOrderId);

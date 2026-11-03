@@ -199,6 +199,14 @@ public class AuditQueryController {
         if ("user_manage".equals(action)) {
             return userNames.get(id);
         }
+        // 购买套餐：target = 门户订单号
+        if ("billing_order".equals(action)) {
+            return "订单 #" + id;
+        }
+        // 套餐续费：target = 开通记录 orderItemId，明细里带了 skuId
+        if ("billing_renew".equals(action)) {
+            return "套餐 #" + id;
+        }
         return null;
     }
 

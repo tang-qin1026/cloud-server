@@ -46,6 +46,12 @@ public final class AuditActions {
     /** 修改计费全局配置 */
     public static final String BILLING_CONFIG = "billing_config";
 
+    /** 购买套餐（用户端下单成功）。target = 门户订单号 */
+    public static final String BILLING_ORDER = "billing_order";
+
+    /** 套餐续费（延长原有开通）。target = 开通记录的 orderItemId */
+    public static final String BILLING_RENEW = "billing_renew";
+
     // ---- 用户降级（A 组新增接口）----
     /** 管理员将用户角色降级（admin→user 等） */
     public static final String USER_DEMOTE = "user_demote";
