@@ -49,11 +49,9 @@ public enum ErrorCode {
 
     // ---- 文件管理（C 组 403xx）----
     FILE_NOT_FOUND(40304, "文件或目录不存在"),
-    FILE_NAME_CONFLICT(40309, "同级存在同名文件"),
     MOVE_INTO_SUBDIR(40310, "不能移动到自身或其子目录下"),
     QUOTA_EXCEEDED(40311, "存储配额不足"),
     RECYCLE_NOT_FOUND(40314, "回收站中不存在该文件"),
-    DIR_NOT_EMPTY_RESTORE_CONFLICT(40315, "还原目标位置存在同名文件"),
 
     // ---- 计费（D 组 billing，404xx，新增入枚举）----
     REQUEST_ALREADY_HANDLED(40402, "该申请已被处理"),
