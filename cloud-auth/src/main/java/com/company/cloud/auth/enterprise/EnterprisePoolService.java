@@ -462,6 +462,173 @@ public class EnterprisePoolService {
                 + java.time.Instant.now().getEpochSecond()
                 + Integer.toHexString(java.util.concurrent.ThreadLocalRandom.current().nextInt(0xFFFF));
     }
+    // ── 个人域续费（2026-11-04）──────────────────────────────────
+    //
+    // 背景：套餐原来只有企业能续（个人域直接 400）。但个人用户也能在套餐页下单，
+    // 买到的额度进自己的 quota_bytes（portal_provision.enterprise_id 为空）。
+    // 这些"自己买的套餐"同样需要能续期，所以补一条个人域路径。
+    //
+    // 数据约定：个人域的续费记录在 subscription_renewal 里用 enterprise_id = 0 标识
+    // （该列无外键，0 不会与任何企业冲突）。
+
+    /**
+     * 个人域续费 · 第一阶段：扣款前记账。
+     *
+     * <p>与企业版的差别：
+     * <ul>
+     *   <li>来源表是 {@code portal_provision}（该用户名下、enterprise_id 为空的那笔），
+     *       不是 {@code enterprise_pool_grant}；</li>
+     *   <li>续费只延长 {@code expire_at}，**不增加** {@code quota_bytes}
+     *       （与企业池"续费不加容量"口径一致）；</li>
+     *   <li>续费记录写 {@code enterprise_id = 0} 表示个人域。</li>
+     * </ul>
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> beginPersonalRenewal(long userId, long orderItemId, long priceCents) {
+        Object recentRaw = jdbc.queryForMap(
+                        "SELECT count(*) AS cnt FROM subscription_renewal "
+                                + "WHERE enterprise_id = 0 AND grant_order_item_id = ? "
+                                + "  AND created_at > now() - (? || ' seconds')::interval",
+                        orderItemId, String.valueOf(renewThrottleSeconds))
+                .get("cnt");
+        long recent = recentRaw instanceof Number n ? n.longValue() : 0L;
+        if (recent > 0) {
+            throw new IllegalArgumentException(
+                    "续费操作过于频繁，请 " + renewThrottleSeconds + " 秒后再试");
+        }
+
+        // 未完成的续费（扣了款但延长失败）→ 复用同一 key，避免重复扣款
+        List<Map<String, Object>> unfinished = jdbc.queryForList(
+                "SELECT id, client_order_key FROM subscription_renewal "
+                        + "WHERE enterprise_id = 0 AND grant_order_item_id = ? "
+                        + "  AND status IN ('pending','orphan') "
+                        + "  AND created_at > now() - interval '30 minutes' "
+                        + "ORDER BY id LIMIT 1", orderItemId);
+        if (!unfinished.isEmpty()) {
+            Map<String, Object> u = unfinished.get(0);
+            Map<String, Object> resume = new LinkedHashMap<>();
+            resume.put("chargeRequired", true);
+            resume.put("resumed", true);
+            resume.put("clientOrderKey", u.get("client_order_key"));
+            resume.put("renewalId", u.get("id"));
+            log.info("[renew] 个人域复用未完成续费 key={}", u.get("client_order_key"));
+            return resume;
+        }
+
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "SELECT pp.order_item_id, pp.sku_id, pp.quantity, pp.expire_at, pp.status, "
+                        + "       COALESCE(pp.period_hours, 720) AS period_hours "
+                        + "FROM portal_provision pp "
+                        + "WHERE pp.order_item_id = ? AND pp.local_user_id = ? "
+                        + "  AND (pp.enterprise_id IS NULL OR pp.enterprise_id = 0)",
+                orderItemId, userId);
+        if (rows.isEmpty()) {
+            throw new IllegalArgumentException("找不到该套餐：" + orderItemId + "（只能续费自己购买的套餐）");
+        }
+        Map<String, Object> r = rows.get(0);
+        // 个人域的 portal_provision.status 只有 pending/granting/active/grace/expired/failed，
+        // **没有 reclaimed**（这是企业池 grant 才有的状态）。
+        // 只有 failed（开通失败）才不允许续费；已 expired 的仍可续（从当前时间起算）。
+        String st = String.valueOf(r.get("status"));
+        if ("failed".equals(st)) {
+            throw new IllegalArgumentException("该套餐开通失败，无法续费；请重新购买");
+        }
+        if (r.get("expire_at") == null) {
+            throw new IllegalArgumentException("该套餐没有到期时间，无法续费（请联系管理员核对开通记录）");
+        }
+
+        java.time.OffsetDateTime before = ((java.sql.Timestamp) r.get("expire_at")).toInstant()
+                .atOffset(java.time.ZoneOffset.ofHours(8));
+        int hours = ((Number) r.get("period_hours")).intValue();
+        java.time.OffsetDateTime base = before.isAfter(java.time.OffsetDateTime.now())
+                ? before : java.time.OffsetDateTime.now();
+        java.time.OffsetDateTime after = base.plusHours(hours);
+
+        String clientOrderKey = newRenewalKey(0L, orderItemId);
+        jdbc.update("INSERT INTO subscription_renewal (enterprise_id, grant_order_item_id, sku_id, "
+                        + "quantity, extend_hours, expire_at_before, expire_at_after, client_order_key, "
+                        + "price_cents, status) VALUES (0,?,?,?,?,?,?,?,?,'pending') "
+                        + "ON CONFLICT (client_order_key) DO NOTHING",
+                orderItemId, String.valueOf(r.get("sku_id")),
+                ((Number) r.get("quantity")).intValue(), hours, before, after,
+                clientOrderKey, priceCents);
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("chargeRequired", true);
+        out.put("clientOrderKey", clientOrderKey);
+        out.put("orderItemId", orderItemId);
+        out.put("skuId", r.get("sku_id"));
+        out.put("quantity", ((Number) r.get("quantity")).intValue());
+        out.put("extendHours", hours);
+        out.put("expireAtBefore", before);
+        out.put("expireAtAfter", after);
+        log.info("[renew] 个人域已记账(pending) userId={} item={} key={} 到期 {} → {}",
+                userId, orderItemId, clientOrderKey, before, after);
+        return out;
+    }
+
+    /** 个人域续费 · 第二阶段：扣款成功后延长到期时间（幂等）。 */
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> applyPersonalRenewal(long userId, long orderItemId,
+                                                    String clientOrderKey, String portalOrderId) {
+        Map<String, Object> row = jdbc.queryForMap(
+                "SELECT id, status, expire_at_after, extend_hours FROM subscription_renewal "
+                        + "WHERE client_order_key = ?", clientOrderKey);
+        String st = String.valueOf(row.get("status"));
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("orderItemId", orderItemId);
+        out.put("clientOrderKey", clientOrderKey);
+
+        if ("applied".equals(st)) {
+            out.put("expireAtAfter", row.get("expire_at_after"));
+            out.put("extendHours", row.get("extend_hours"));
+            out.put("duplicated", true);
+            return out;
+        }
+
+        java.time.OffsetDateTime after = ((java.sql.Timestamp) row.get("expire_at_after")).toInstant()
+                .atOffset(java.time.ZoneOffset.ofHours(8));
+        int updated = jdbc.update(
+                "UPDATE portal_provision SET expire_at = ? WHERE order_item_id = ? AND local_user_id = ? "
+                        + "AND (enterprise_id IS NULL OR enterprise_id = 0)",
+                after, orderItemId, userId);
+        if (updated == 0) {
+            throw new IllegalStateException("延长失败：找不到该用户名下的开通记录 " + orderItemId);
+        }
+        jdbc.update("UPDATE subscription_renewal SET status = 'applied', portal_order_id = ?, "
+                + "updated_at = now() WHERE client_order_key = ?", portalOrderId, clientOrderKey);
+
+        out.put("expireAtAfter", after);
+        out.put("extendHours", row.get("extend_hours"));
+        out.put("duplicated", false);
+        log.info("[renew] 个人域续费完成 userId={} item={} 新到期={}", userId, orderItemId, after);
+        return out;
+    }
+
+    /** 个人域：我自己买的套餐列表（用于套餐页展示与续费入口）。 */
+    public List<Map<String, Object>> personalSubscriptions(long userId) {
+        return jdbc.queryForList(
+                "SELECT pp.order_item_id AS \"orderItemId\", "
+                        + "       pp.sku_id AS \"skuId\", "
+                        + "       COALESCE(s.name, pp.sku_id) AS \"skuName\", "
+                        + "       COALESCE(pp.quantity, 1) AS \"quantity\", "
+                        + "       COALESCE(s.quota_gb, 0) AS \"unitQuotaGb\", "
+                        + "       pp.granted_bytes AS \"grantedBytes\", "
+                        + "       COALESCE(s.price_cents, 0) AS \"priceCents\", "
+                        + "       COALESCE(pp.period_hours, 720) AS \"periodHours\", "
+                        + "       COALESCE(pp.period_hours, 720) / 24 AS \"periodDays\", "
+                        + "       pp.created_at AS \"createdAt\", "
+                        + "       pp.status AS \"status\", "
+                        + "       pp.expire_at AS \"expireAt\", "
+                        + "       (SELECT count(*) FROM subscription_renewal sr "
+                        + "         WHERE sr.enterprise_id = 0 AND sr.grant_order_item_id = pp.order_item_id "
+                        + "           AND sr.status = 'applied') AS \"renewals\", "
+                        + "       (pp.expire_at IS NOT NULL AND pp.expire_at < now()) AS \"expired\" "
+                        + "FROM portal_provision pp "
+                        + "LEFT JOIN portal_product_sku s ON s.sku_id = pp.sku_id "
+                        + "WHERE pp.local_user_id = ? AND (pp.enterprise_id IS NULL OR pp.enterprise_id = 0) "
+                        + "ORDER BY pp.order_item_id DESC", userId);
+    }
     // ── 两阶段记账 · 第一阶段：扣款前记账 ────────────────────────
 
     /**

@@ -185,10 +185,12 @@ public class PackageController {
                                              @org.springframework.web.bind.annotation.PathVariable long orderItemId) {
         CurrentUser cu = currentUser(authentication);
         Long entId = cu.getEnterpriseId();
+
+        // 个人域（普通用户）：续费**自己购买的**套餐（2026-11-04 放开）
         if (entId == null || entId <= 0L) {
-            throw new BizException(ErrorCode.BAD_REQUEST, "该接口只在企业内可用（个人域没有套餐开通记录）");
+            return renewPersonal(cu, orderItemId);
         }
-        // 续费=花钱，只允许企业管理员（普通成员只能看，与套餐页口径一致）
+        // 企业内：续费=花企业的钱，仍只允许管理员（普通成员只能看）
         if (!canPurchase(cu)) {
             throw new BizException(ErrorCode.FORBIDDEN,
                     "企业成员只能查看套餐，如需续费请联系企业管理员");
@@ -273,6 +275,102 @@ public class PackageController {
         log.info("[renew] 企业 {} 续费 orderItem={} sku={} x{} 到期 {} → {} 门户单={}",
                 entId, orderItemId, skuId, quantity,
                 out.get("expireAtBefore"), out.get("expireAtAfter"), portalOrderId);
+        return Result.ok(out);
+    }
+    // ── 个人域（普通用户）续费 2026-11-04 ─────────────────────────
+
+    /**
+     * 个人域用户的套餐列表：自己买过的那几笔（含到期时间与续费次数）。
+     *
+     * <p>企业用户走 {@code GET /enterprise/subscriptions}（企业池口径），个人用户走这里。
+     */
+    @GetMapping("/subscriptions")
+    public Result<java.util.List<Map<String, Object>>> subscriptions(Authentication authentication) {
+        CurrentUser cu = currentUser(authentication);
+        Long entId = cu.getEnterpriseId();
+        if (entId != null && entId > 0L) {
+            throw new BizException(ErrorCode.BAD_REQUEST,
+                    "企业用户请使用 GET /enterprise/subscriptions（企业池口径）");
+        }
+        return Result.ok(poolService.personalSubscriptions(cu.getId()));
+    }
+
+    /**
+     * 个人域续费：只延长自己那笔套餐的到期时间，**不增加容量**。
+     *
+     * <p>流程与企业版一致（两阶段记账 + 秒级节流 + 未完成记录复用），
+     * 差别只在数据来源：{@code portal_provision} 里该用户名下的记录。
+     */
+    private Result<Map<String, Object>> renewPersonal(CurrentUser cu, long orderItemId) {
+        String portalUserId = portalUserMapRepository.findByLocalUserId(cu.getId())
+                .map(PortalUserMap::getPortalUserId)
+                .orElseThrow(() -> new BizException(ErrorCode.BAD_REQUEST,
+                        "当前账号未关联门户用户，无法续费（请用门户账号登录后重试）"));
+
+        Map<String, Object> one = poolService.personalSubscriptions(cu.getId()).stream()
+                .filter(r -> String.valueOf(orderItemId).equals(String.valueOf(r.get("orderItemId"))))
+                .findFirst()
+                .orElseThrow(() -> new BizException(ErrorCode.BAD_REQUEST,
+                        "找不到该套餐：" + orderItemId + "（只能续费自己购买的套餐）"));
+        if ("failed".equals(String.valueOf(one.get("status")))) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "该套餐开通失败，无法续费；请重新购买");
+        }
+        String skuId = String.valueOf(one.get("skuId"));
+        int quantity = ((Number) one.get("quantity")).intValue();
+        long priceCents = ((Number) one.get("priceCents")).longValue() * quantity;
+
+        Map<String, Object> begun;
+        try {
+            begun = poolService.beginPersonalRenewal(cu.getId(), orderItemId, priceCents);
+        } catch (IllegalArgumentException e) {
+            throw new BizException(ErrorCode.BAD_REQUEST, e.getMessage());
+        }
+        String key = String.valueOf(begun.get("clientOrderKey"));
+
+        List<Map<String, Object>> items = new ArrayList<>();
+        items.add(Map.of("product_code", props.getProductCode(), "sku_id", skuId, "quantity", quantity));
+
+        PortalApiResponse resp = orderClient.createOrder(portalUserId, key, items, null);
+        if (!resp.success()) {
+            throw new BizException(ErrorCode.BAD_REQUEST,
+                    "门户下单失败（code=" + resp.code() + "）：" + resp.message());
+        }
+        String portalOrderId = resp.data() == null ? null : resp.data().path("order_id").asText(null);
+
+        Map<String, Object> out;
+        try {
+            out = poolService.applyPersonalRenewal(cu.getId(), orderItemId, key, portalOrderId);
+        } catch (Exception e) {
+            log.error("[renew] 个人域已扣款但延长失败 userId={} item={} key={} portalOrder={} err={}",
+                    cu.getId(), orderItemId, key, portalOrderId, e.toString());
+            throw new BizException(ErrorCode.BAD_REQUEST,
+                    "已扣款但续费写入失败，请**重新点击续费**（同一幂等键会跳过重复扣款），"
+                            + "若仍失败请联系管理员并提供订单号 " + portalOrderId + " / 幂等键 " + key);
+        }
+
+        out.put("portalOrderId", portalOrderId);
+        out.put("skuId", skuId);
+        out.put("quantity", quantity);
+        out.put("priceCents", priceCents);
+        out.put("priceYuan", BigDecimal.valueOf(priceCents).movePointLeft(2).toPlainString());
+
+        Map<String, Object> detail = new LinkedHashMap<>();
+        detail.put("orderItemId", orderItemId);
+        detail.put("skuId", skuId);
+        detail.put("quantity", quantity);
+        detail.put("priceCents", priceCents);
+        detail.put("clientOrderKey", key);
+        detail.put("portalOrderId", portalOrderId);
+        detail.put("expireAtBefore", begun.get("expireAtBefore"));
+        detail.put("expireAtAfter", out.get("expireAtAfter"));
+        detail.put("extendHours", out.get("extendHours"));
+        detail.put("duplicated", out.get("duplicated"));
+        detail.put("buyer", "personal");
+        auditService.record(new AuditEvent(cu.getId(), AuditActions.BILLING_RENEW,
+                String.valueOf(orderItemId), null, detail));
+
+        log.info("[renew] 个人域续费成功 userId={} item={} 到期={} 金额={}分",
+                cu.getId(), orderItemId, out.get("expireAtAfter"), priceCents);
         return Result.ok(out);
     }
 }
