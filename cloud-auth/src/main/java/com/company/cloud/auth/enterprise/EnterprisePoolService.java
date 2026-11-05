@@ -462,6 +462,41 @@ public class EnterprisePoolService {
                 + java.time.Instant.now().getEpochSecond()
                 + Integer.toHexString(java.util.concurrent.ThreadLocalRandom.current().nextInt(0xFFFF));
     }
+
+    /**
+     * 个人域：回调识别续费单。
+     *
+     * <p>与企业版 {@code consumeRenewalIfAny} 的差别只在定位方式：
+     * 企业域按 (企业, SKU, 数量) 找，个人域要按 **(本人名下的套餐, SKU, 数量)** 找，
+     * 否则会把别人的个人域续费认成自己的。
+     *
+     * <p>命中后把 {@code callback_consumed} 置 true，回调侧据此跳过发放容量。
+     * 状态仍是 pending/applied —— 延长由 {@code applyPersonalRenewal} 负责，
+     * 回调可能早于延长到达。
+     */
+    public Map<String, Object> consumePersonalRenewalIfAny(long userId, String skuId, int quantity) {
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "SELECT sr.id, sr.grant_order_item_id, sr.extend_hours, "
+                        + "       sr.expire_at_before, sr.expire_at_after, sr.status "
+                        + "FROM subscription_renewal sr "
+                        + "JOIN portal_provision pp "
+                        + "  ON pp.order_item_id = sr.grant_order_item_id "
+                        + " AND pp.local_user_id = ? "
+                        + " AND (pp.enterprise_id IS NULL OR pp.enterprise_id = 0) "
+                        + "WHERE sr.enterprise_id = 0 AND sr.sku_id = ? AND sr.quantity = ? "
+                        + "  AND sr.status IN ('pending','applied','orphan') "
+                        + "  AND sr.callback_consumed = FALSE "
+                        + "  AND sr.created_at > now() - interval '2 hours' "
+                        + "ORDER BY sr.id LIMIT 1",
+                userId, skuId, quantity);
+        if (rows.isEmpty()) {
+            return null;
+        }
+        Map<String, Object> hit = rows.get(0);
+        jdbc.update("UPDATE subscription_renewal SET callback_consumed = TRUE, updated_at = now() "
+                + "WHERE id = ?", hit.get("id"));
+        return hit;
+    }
     // ── 个人域续费（2026-11-04）──────────────────────────────────
     //
     // 背景：套餐原来只有企业能续（个人域直接 400）。但个人用户也能在套餐页下单，
@@ -627,6 +662,12 @@ public class EnterprisePoolService {
                         + "FROM portal_provision pp "
                         + "LEFT JOIN portal_product_sku s ON s.sku_id = pp.sku_id "
                         + "WHERE pp.local_user_id = ? AND (pp.enterprise_id IS NULL OR pp.enterprise_id = 0) "
+                        // 排除「续费代理行」：门户续费会回调一笔新 order_item，
+                        // 我们为对账插一条 granted_bytes=0 的记录。它不该在列表里
+                        // 表现成"又买了一个套餐"，续费只应体现在原套餐的到期时间上。
+                        + "  AND NOT EXISTS (SELECT 1 FROM subscription_renewal sr "
+                        + "                   WHERE sr.enterprise_id = 0 "
+                        + "                     AND sr.matched_order_item_id = pp.order_item_id) "
                         + "ORDER BY pp.order_item_id DESC", userId);
     }
     // ── 两阶段记账 · 第一阶段：扣款前记账 ────────────────────────

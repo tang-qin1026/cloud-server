@@ -132,14 +132,16 @@ public class PortalProvisionService {
             // 命中 subscription_renewal 则：不发放额度，只记一条 granted_bytes=0 的开通记录用于对账，
             // 并把它与门户 order_item 关联。
             Long purchaseEntIdEarly = resolvePurchaseEnterpriseId(req, localUser);
-            if (purchaseEntIdEarly != null && purchaseEntIdEarly > 0L) {
-                Map<String, Object> renewal = poolService.consumeRenewalIfAny(
-                        purchaseEntIdEarly, req.skuId(), quantity);
-                if (renewal != null) {
+            // 个人域也要识别续费（2026-11-05）：否则个人用户续费时，
+            // 回调会被当成新购买 —— 既多发一份容量，又在套餐列表里多出一行。
+            Map<String, Object> renewal = purchaseEntIdEarly != null && purchaseEntIdEarly > 0L
+                    ? poolService.consumeRenewalIfAny(purchaseEntIdEarly, req.skuId(), quantity)
+                    : poolService.consumePersonalRenewalIfAny(localUser.getId(), req.skuId(), quantity);
+            if (renewal != null) {
                     long renewalId = ((Number) renewal.get("id")).longValue();
                     long extendsHours = ((Number) renewal.get("extend_hours")).longValue();
-                    log.info("[portal] provision 命中续费单 orderItemId={} 企业={} 原开通={} 已延长 {} 小时，本次不发放额度",
-                            req.orderItemId(), purchaseEntIdEarly,
+                    log.info("[portal] provision 命中续费单 orderItemId={} 企业={} 个人={} 原开通={} 已延长 {} 小时，本次不发放额度",
+                            req.orderItemId(), purchaseEntIdEarly, localUser.getId(),
                             renewal.get("grant_order_item_id"), extendsHours);
                     poolService.bindRenewalToOrderItem(renewalId, req.orderItemId());
 
@@ -168,7 +170,6 @@ public class PortalProvisionService {
                         throw PortalApiException.internalError("续费记录冲突，请重试");
                     }
                     return record;
-                }
             }
 
             long grantedBytes = computeGrantedBytes(sku, quantity);
